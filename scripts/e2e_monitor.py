@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.10"
+# dependencies = ["bleak"]
+# ///
 """e2e_monitor.py — over-the-air E2E monitor for the SP-1 beacon firmware.
 
 Scans for the SP-1's BLE advertisements (the CYW20706 module's broadcast) and
@@ -14,11 +18,10 @@ service (0x1812) in the primary AD and the BLE-MIDI service + name in the scan
 response. We match on the name and/or the distinctive BLE-MIDI UUID.
 
 Usage:
-  scripts/e2e_monitor.py                 # watch for "feldd" bursts
-  scripts/e2e_monitor.py --name NAME     # a different advertised name
-  scripts/e2e_monitor.py --any           # print every BLE sighting (debug)
+  uv run scripts/e2e_monitor.py          # uv installs bleak automatically
+  uv run scripts/e2e_monitor.py --any    # print every BLE sighting (debug)
+  scripts/e2e_monitor.py --name NAME     # plain python3 (needs: pip3 install bleak)
 
-Needs bleak:  pip3 install bleak
 macOS: grant your terminal Bluetooth permission (System Settings > Privacy).
 """
 import argparse
