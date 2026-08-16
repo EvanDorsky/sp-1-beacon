@@ -219,6 +219,7 @@ static const char *const btn_name[BTN_COUNT] = {
 static int      adv_ticks;      /* >0: burst in flight, counts down */
 static int      adv_track;      /* which track LED is lit for the burst, -1 none */
 static bool     adv_pending;    /* burst requested while the module was booting */
+static bool     ping_pending;   /* ping requested while the module was booting */
 
 static void adv_burst_start(int track_idx)
 {
@@ -240,7 +241,11 @@ static void adv_burst_start(int track_idx)
 
 static void adv_burst_tick(void)
 {
-    /* A burst asked for before the app was up fires as soon as it is. */
+    /* Work asked for before the app was up fires as soon as it is. */
+    if (ping_pending && module_link_state() == MODULE_UP) {
+        ping_pending = false;
+        (void)module_link_ping();
+    }
     if (adv_pending && module_link_state() == MODULE_UP) {
         adv_pending = false;
         adv_burst_start(adv_track >= 0 ? adv_track : 0);
@@ -260,21 +265,26 @@ static void handle_button(const struct button_event *e)
     if (!e->pressed) {
         return;
     }
-    switch (e->idx) {
-    case 0:                                   /* PLAY: ping the module app */
-        if (module_link_state() == MODULE_OFF) {
-            module_link_power(true);
+    /* E2E liveness: EVERY press (except RWD, the module-off switch) pings the
+     * module app, booting it first if needed. The app's reply (its READY event)
+     * closes the button -> nRF -> module -> nRF loop on the console, which
+     * scripts/e2e_monitor.py watches for. */
+    if (e->idx != 8) {
+        if (module_link_state() == MODULE_UP) {
+            (void)module_link_ping();
+        } else {
+            ping_pending = true;
+            module_link_power(true);          /* no-op unless the module is off */
         }
-        (void)module_link_ping();
+    }
+    switch (e->idx) {
+    case 0:                                   /* PLAY: ping only (above) */
         break;
     case 1: case 2: case 3: case 4:           /* Track N: presence-beacon burst */
         adv_track = e->idx - 1;
         adv_burst_start(e->idx - 1);
         break;
     case 5:                                   /* Vol+: advertising on (manual) */
-        if (module_link_state() == MODULE_OFF) {
-            module_link_power(true);
-        }
         (void)module_link_adv(true);
         break;
     case 6:                                   /* Vol-: advertising off */
@@ -287,6 +297,7 @@ static void handle_button(const struct button_event *e)
         module_link_power(false);
         adv_ticks = 0;
         adv_pending = false;
+        ping_pending = false;
         if (adv_track >= 0) {
             led_idx(adv_track, false);
             adv_track = -1;

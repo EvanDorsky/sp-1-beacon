@@ -28,15 +28,19 @@ WICED-HCI command group:
 
 | Control | Action |
 |---------|--------|
-| Track 1–4 | ~2 s advertising burst (presence beacon; boots the module first if needed) |
-| Play | PING the module app |
+| Any button press | PING the module app (E2E liveness; boots the module first if needed — RWD excepted) |
+| Track 1–4 | additionally: ~2 s advertising burst (presence beacon) |
+| Play | PING only |
 | Vol +/− | Advertising on / off (manual) |
 | FWD / RWD | Module boot / module into reset (BT hard-off) |
 | •• hold ~5 s | Power off (SYSTEM_OFF; •• wakes) |
 | Track 1+4 hold ~1.2 s | DFU — reboot into the TE bootloader for reflashing |
 
 Every button edge and every WICED-HCI frame (both directions) is logged on the
-USB-CDC console (`./scripts/fw.sh monitor`).
+USB-CDC console (`./scripts/fw.sh monitor`). For end-to-end testing,
+`./scripts/fw.sh e2e` runs `scripts/e2e_monitor.py` (needs `pip3 install
+pyserial`), which prints one line per press / PING / module reply with
+round-trip times.
 
 Planned next (see the milestone plan in the project discussion): a dedicated
 beacon module app (non-connectable advertising with a per-button payload), the

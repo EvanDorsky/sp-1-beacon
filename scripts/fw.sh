@@ -7,6 +7,7 @@
 #   ./scripts/fw.sh info       size + link-address sanity of the current build
 #   ./scripts/fw.sh test       run the host unit tests
 #   ./scripts/fw.sh monitor    open the SP-1 CDC serial console
+#   ./scripts/fw.sh e2e        press->ping E2E monitor (scripts/e2e_monitor.py)
 #   ./scripts/fw.sh clean      remove the build dir
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -50,6 +51,7 @@ case "${1:-}" in
   monitor) port=$(ls /dev/cu.usbmodem* 2>/dev/null | head -1)
            [ -n "$port" ] && { echo "opening $port (ctrl-a k to quit screen)"; screen "$port" 115200; } \
              || echo "no /dev/cu.usbmodem* - is the SP-1 plugged in and flashed?" ;;
+  e2e)     shift; python3 "$ROOT/scripts/e2e_monitor.py" "$@" ;;
   clean)   rm -rf "$BUILD" && echo "cleaned $BUILD" ;;
-  *) sed -n '2,11p' "$0" ;;
+  *) sed -n '2,12p' "$0" ;;
 esac
