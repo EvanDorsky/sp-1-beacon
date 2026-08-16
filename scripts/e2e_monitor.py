@@ -1,110 +1,110 @@
 #!/usr/bin/env python3
-"""e2e_monitor.py — end-to-end press->ping monitor for the SP-1 beacon firmware.
+"""e2e_monitor.py — over-the-air E2E monitor for the SP-1 beacon firmware.
 
-Watches the SP-1's USB-CDC console and prints one clean line per event in the
-button -> nRF -> CYW20706 -> nRF loop:
+Scans for the SP-1's BLE advertisements (the CYW20706 module's broadcast) and
+prints one line per advertising BURST, so the whole chain is proven end to end:
 
-  - a button edge          ("BTN T1 down")
-  - the PING going out     ("BT: tx grp=f0 code=03")
-  - the module's reply     ("BT: rx wiced grp=f0 ..." — the app's READY event),
-    with the press->reply round-trip time
+  button press -> nRF -> WICED-HCI -> module -> RADIO -> this machine
+
+Press any SP-1 button except Vol-/RWD and a ~2 s burst should appear here.
+No pairing needed — advertising packets are broadcast; any listener sees them.
+
+The module (still running feldd's BLE app) advertises as "feldd": an HID
+service (0x1812) in the primary AD and the BLE-MIDI service + name in the scan
+response. We match on the name and/or the distinctive BLE-MIDI UUID.
 
 Usage:
-  scripts/e2e_monitor.py               # auto-detect /dev/cu.usbmodem*
-  scripts/e2e_monitor.py --port PORT   # explicit port
-  scripts/e2e_monitor.py --all         # also pass through every other line
+  scripts/e2e_monitor.py                 # watch for "feldd" bursts
+  scripts/e2e_monitor.py --name NAME     # a different advertised name
+  scripts/e2e_monitor.py --any           # print every BLE sighting (debug)
 
-Needs pyserial:  pip3 install pyserial
+Needs bleak:  pip3 install bleak
+macOS: grant your terminal Bluetooth permission (System Settings > Privacy).
 """
 import argparse
-import glob
-import re
+import asyncio
 import sys
 import time
 
 try:
-    import serial
+    from bleak import BleakScanner
 except ImportError:
-    sys.exit("pyserial is required:  pip3 install pyserial")
+    sys.exit("bleak is required:  pip3 install bleak")
 
-RE_BTN = re.compile(r"^BTN (\S+) (down|up)")
-RE_TX_PING = re.compile(r"^BT: tx grp=f0 code=03")
-RE_RX_FELDD = re.compile(r"^BT: rx wiced grp=f0 code=(\S+) len=\d+:(.*)")
-RE_MODULE = re.compile(r"^BT: (module .*)")
+BLE_MIDI_UUID = "03b80e5a-ede8-4b33-a751-6ce34ec4c700"
 
-
-def find_port() -> str:
-    ports = sorted(glob.glob("/dev/cu.usbmodem*"))
-    if not ports:
-        sys.exit("no /dev/cu.usbmodem* found — is the SP-1 plugged in and flashed?")
-    if len(ports) > 1:
-        print(f"multiple ports, using {ports[0]} (others: {', '.join(ports[1:])})")
-    return ports[0]
+# A gap this long with no sighting ends the burst. The firmware's burst is ~2 s
+# of advertising at a fast interval, so intra-burst gaps stay well under this.
+BURST_GAP_S = 1.5
 
 
 def stamp() -> str:
     return time.strftime("%H:%M:%S", time.localtime()) + f".{int(time.time() * 1000) % 1000:03d}"
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser(description="SP-1 press->ping E2E monitor")
-    ap.add_argument("--port", help="serial port (default: first /dev/cu.usbmodem*)")
-    ap.add_argument("--all", action="store_true", help="pass through every console line")
+class BurstWatch:
+    def __init__(self, name: str, show_any: bool):
+        self.name = name.lower()
+        self.show_any = show_any
+        self.burst_start = None     # monotonic time of first sighting
+        self.last_seen = None
+        self.sightings = 0
+        self.last_rssi = None
+        self.bursts = 0
+
+    def matches(self, device, adv) -> bool:
+        local = (adv.local_name or device.name or "").lower()
+        if local == self.name:
+            return True
+        return any(u.lower() == BLE_MIDI_UUID for u in (adv.service_uuids or []))
+
+    def on_detect(self, device, adv) -> None:
+        now = time.monotonic()
+        if self.show_any:
+            print(f"{stamp()}  . {adv.local_name or device.name or '?':24s} "
+                  f"rssi={adv.rssi:4d}  uuids={adv.service_uuids or []}")
+        if not self.matches(device, adv):
+            return
+        self.last_rssi = adv.rssi
+        if self.burst_start is None:
+            self.bursts += 1
+            self.sightings = 0
+            self.burst_start = now
+            print(f"{stamp()}  BURST #{self.bursts} on the air  "
+                  f"name={adv.local_name or device.name!r} rssi={adv.rssi}")
+        self.sightings += 1
+        self.last_seen = now
+
+    def check_burst_end(self) -> None:
+        if self.burst_start is None or self.last_seen is None:
+            return
+        now = time.monotonic()
+        if now - self.last_seen > BURST_GAP_S:
+            dur = self.last_seen - self.burst_start
+            print(f"{stamp()}  burst #{self.bursts} over — {dur:.1f} s on air, "
+                  f"{self.sightings} sighting(s), last rssi={self.last_rssi}")
+            self.burst_start = None
+            self.last_seen = None
+
+
+async def main() -> None:
+    ap = argparse.ArgumentParser(description="SP-1 over-the-air E2E monitor")
+    ap.add_argument("--name", default="feldd", help="advertised device name (default: feldd)")
+    ap.add_argument("--any", action="store_true", help="print every BLE sighting (debug)")
     args = ap.parse_args()
 
-    port = args.port or find_port()
-    ser = serial.Serial(port, 115200, timeout=0.2)
-    print(f"listening on {port} — press SP-1 buttons (ctrl-c to quit)")
+    watch = BurstWatch(args.name, args.any)
+    print(f"scanning for '{args.name}' advertisements — press SP-1 buttons (ctrl-c to quit)")
+    print("(no pairing needed; if a bonded Mac/iPhone auto-connects it may shorten a burst)")
 
-    t_press = None      # last button-down, for press->reply RTT
-    t_ping = None       # last ping tx, for ping->reply RTT
-    last_btn = "?"
-    pings = replies = 0
-
-    try:
+    async with BleakScanner(watch.on_detect):
         while True:
-            raw = ser.readline()
-            if not raw:
-                continue
-            line = raw.decode("utf-8", errors="replace").strip()
-            if not line:
-                continue
-            now = time.monotonic()
-
-            m = RE_BTN.match(line)
-            if m:
-                name, edge = m.groups()
-                if edge == "down":
-                    t_press, last_btn = now, name
-                print(f"{stamp()}  button {name} {edge}")
-                continue
-
-            if RE_TX_PING.match(line):
-                t_ping = now
-                pings += 1
-                print(f"{stamp()}    -> PING (#{pings})")
-                continue
-
-            m = RE_RX_FELDD.match(line)
-            if m:
-                code, payload = m.groups()
-                replies += 1
-                rtt = f" — answered in {(now - t_ping) * 1000:.0f} ms" if t_ping else ""
-                press = f", {(now - t_press) * 1000:.0f} ms after {last_btn} press" if t_press else ""
-                print(f"{stamp()}    <- module event code={code}{rtt}{press}  [{payload.strip()}]")
-                t_ping = t_press = None
-                continue
-
-            m = RE_MODULE.match(line)
-            if m:
-                print(f"{stamp()}  {m.group(1)}")
-                continue
-
-            if args.all:
-                print(f"{stamp()}  | {line}")
-    except KeyboardInterrupt:
-        print(f"\n{pings} pings sent, {replies} module replies seen")
+            await asyncio.sleep(0.2)
+            watch.check_burst_end()
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\nbye")

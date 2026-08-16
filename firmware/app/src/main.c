@@ -219,12 +219,17 @@ static const char *const btn_name[BTN_COUNT] = {
 static int      adv_ticks;      /* >0: burst in flight, counts down */
 static int      adv_track;      /* which track LED is lit for the burst, -1 none */
 static bool     adv_pending;    /* burst requested while the module was booting */
+static int      adv_pending_track = -1;
 static bool     ping_pending;   /* ping requested while the module was booting */
 
+/* Start a ~2 s advertising burst (track_idx 0..3 lights that track LED, -1
+ * lights none). If the module is still booting, the burst is queued and fires
+ * on UP. */
 static void adv_burst_start(int track_idx)
 {
     if (module_link_state() != MODULE_UP) {
         adv_pending = true;
+        adv_pending_track = track_idx;
         module_link_power(true);        /* boots the app; burst fires on UP */
         return;
     }
@@ -239,6 +244,20 @@ static void adv_burst_start(int track_idx)
     }
 }
 
+static void adv_burst_cancel(bool send_stop)
+{
+    adv_ticks = 0;
+    adv_pending = false;
+    adv_pending_track = -1;
+    if (send_stop) {
+        (void)module_link_adv(false);
+    }
+    if (adv_track >= 0) {
+        led_idx(adv_track, false);
+        adv_track = -1;
+    }
+}
+
 static void adv_burst_tick(void)
 {
     /* Work asked for before the app was up fires as soon as it is. */
@@ -248,7 +267,7 @@ static void adv_burst_tick(void)
     }
     if (adv_pending && module_link_state() == MODULE_UP) {
         adv_pending = false;
-        adv_burst_start(adv_track >= 0 ? adv_track : 0);
+        adv_burst_start(adv_pending_track);
     }
     if (adv_ticks > 0 && --adv_ticks == 0) {
         (void)module_link_adv(false);
@@ -267,8 +286,7 @@ static void handle_button(const struct button_event *e)
     }
     /* E2E liveness: EVERY press (except RWD, the module-off switch) pings the
      * module app, booting it first if needed. The app's reply (its READY event)
-     * closes the button -> nRF -> module -> nRF loop on the console, which
-     * scripts/e2e_monitor.py watches for. */
+     * closes the wired button -> nRF -> module -> nRF loop on the console. */
     if (e->idx != 8) {
         if (module_link_state() == MODULE_UP) {
             (void)module_link_ping();
@@ -278,30 +296,23 @@ static void handle_button(const struct button_event *e)
         }
     }
     switch (e->idx) {
-    case 0:                                   /* PLAY: ping only (above) */
+    case 0: case 1: case 2: case 3: case 4:   /* PLAY + Track N: ADV burst — the
+                                               * OVER-THE-AIR E2E event that
+                                               * scripts/e2e_monitor.py sees */
+    case 7:                                   /* FWD too (also boots the module) */
+        adv_burst_start(e->idx >= 1 && e->idx <= 4 ? e->idx - 1 : -1);
         break;
-    case 1: case 2: case 3: case 4:           /* Track N: presence-beacon burst */
-        adv_track = e->idx - 1;
-        adv_burst_start(e->idx - 1);
-        break;
-    case 5:                                   /* Vol+: advertising on (manual) */
+    case 5:                                   /* Vol+: advertising ON, no auto-stop */
+        adv_burst_cancel(false);
         (void)module_link_adv(true);
         break;
-    case 6:                                   /* Vol-: advertising off */
-        (void)module_link_adv(false);
-        break;
-    case 7:                                   /* FWD: boot the module */
-        module_link_power(true);
+    case 6:                                   /* Vol-: advertising off / cancel burst */
+        adv_burst_cancel(true);
         break;
     case 8:                                   /* RWD: module into reset */
         module_link_power(false);
-        adv_ticks = 0;
-        adv_pending = false;
+        adv_burst_cancel(false);              /* reset kills adv; nothing to send */
         ping_pending = false;
-        if (adv_track >= 0) {
-            led_idx(adv_track, false);
-            adv_track = -1;
-        }
         break;
     default:
         break;

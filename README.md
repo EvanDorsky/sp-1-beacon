@@ -28,19 +28,19 @@ WICED-HCI command group:
 
 | Control | Action |
 |---------|--------|
-| Any button press | PING the module app (E2E liveness; boots the module first if needed — RWD excepted) |
-| Track 1–4 | additionally: ~2 s advertising burst (presence beacon) |
-| Play | PING only |
-| Vol +/− | Advertising on / off (manual) |
-| FWD / RWD | Module boot / module into reset (BT hard-off) |
+| Play, Track 1–4, FWD | ~2 s **advertising burst** — the over-the-air E2E event (boots the module first if needed; Track N also lights its LED) |
+| Any press except RWD | additionally PINGs the module app over the wired UART (console liveness) |
+| Vol + | Advertising on, no auto-stop |
+| Vol − | Advertising off / cancel burst |
+| RWD | Module into reset (BT hard-off) |
 | •• hold ~5 s | Power off (SYSTEM_OFF; •• wakes) |
 | Track 1+4 hold ~1.2 s | DFU — reboot into the TE bootloader for reflashing |
 
 Every button edge and every WICED-HCI frame (both directions) is logged on the
-USB-CDC console (`./scripts/fw.sh monitor`). For end-to-end testing,
-`./scripts/fw.sh e2e` runs `scripts/e2e_monitor.py` (needs `pip3 install
-pyserial`), which prints one line per press / PING / module reply with
-round-trip times.
+USB-CDC console (`./scripts/fw.sh monitor`). For end-to-end testing over the
+air, `./scripts/fw.sh e2e` runs `scripts/e2e_monitor.py` (needs `pip3 install
+bleak`), which BLE-scans for the module's advertisements and prints one line
+per burst — press a button, see the burst arrive by radio. No pairing needed.
 
 Planned next (see the milestone plan in the project discussion): a dedicated
 beacon module app (non-connectable advertising with a per-button payload), the
