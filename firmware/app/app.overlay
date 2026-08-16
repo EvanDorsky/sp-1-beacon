@@ -6,40 +6,39 @@
 
 / {
     zephyr,user {
-        /* idx: 0=ladder tracks(AIN0), 1=ladder vol(AIN1), 2..5=faders1..4(AIN3,6,2,7), 6=battery(AIN4) */
-        io-channels = <&adc 0>, <&adc 1>, <&adc 2>, <&adc 3>, <&adc 4>, <&adc 5>, <&adc 6>;
-        /* M3.2 TRS MIDI out: ring = PNP current-source base on P0.23, active-LOW
-         * (drive logical-1 to enable; the GPIO_ACTIVE_LOW flag inverts it to the
-         * electrical low the PNP base wants). Coexists with io-channels above. */
-        midi_ring_gpios = <&gpio0 23 GPIO_ACTIVE_LOW>;
+        /* idx: 0=ladder tracks(AIN0), 1=ladder vol(AIN1), 2=battery(AIN4).
+         * (feldd's 4 fader channels are dropped — the beacon firmware reads
+         * no faders.) */
+        io-channels = <&adc 0>, <&adc 1>, <&adc 2>;
     };
     chosen { zephyr,console = &cdc_acm_uart0; };
-
-    /* The USB-MIDI surface is now the hand-rolled USB-MIDI 1.0 class
-     * (usb_midi1.c), which needs no DT node — it is registered via
-     * USBD_DEFINE_CLASS. The old zephyr,midi2-device node was removed along with
-     * the usbd_midi2 function. */
 };
 
-/* M3.2 TRS MIDI out (31250 baud, TX-only) on uart1/uarte1.
- * Tip data = UARTE TXD on P0.20 (idles high = MIDI mark/"1"). P0.20 is the
- * most-likely TXD per the CA-033/RP-054 research; if the on-hardware bench
- * (scope + OP-XY) later shows P0.17 is the real tip TXD, flip the psels pin
- * number below from 20 to 17 — a one-line pinctrl change.
- * A second tip pin (P0.17, a parallel current copy) is only needed if one pin
- * cannot drive the MIDI opto; DEFERRED until one-pin drive proves too weak. */
 &pinctrl {
-    uart1_default: uart1_default { group1 { psels = <NRF_PSEL(UART_TX, 0, 20)>; }; };
-    uart1_sleep:   uart1_sleep   { group1 { psels = <NRF_PSEL(UART_TX, 0, 20)>; low-power-enable; }; };
-
-    /* NOTE: the BT module UART0 (P1.02 TX / P1.04 RX) pinctrl + the &uart0 enable
-     * node live in bt_uart0.overlay, a BT-only EXTRA_DTC_OVERLAY_FILE fragment.
-     * They are deliberately NOT here: DT overlays are not Kconfig-gated, so enabling
-     * &uart0 in this shared overlay would boot-init UARTE0 in the SHIPPED no-BT image
-     * (0.24 never did). See bt_uart0.overlay. */
+    /* CYW20706 module WICED-HCI UART (module_link.c). Pins captured on real
+     * hardware (bluetooth/hardware-and-architecture.md §1):
+     *   nRF TX P1.02 -> module RX,  nRF RX P1.04 <- module TX,
+     *   nRF CTS P1.03 <- module RTS (real UARTE flow control).
+     * DELIBERATELY NOT pselled: UART_RTS on P1.01 (-> module CTS). That line
+     * is the boot-ROM DOWNLOAD-MODE strap (low across a reset release), so
+     * module_link.c drives it as a plain GPIO: high through every normal boot,
+     * low afterwards so the module may transmit. Mirrors feldd's bt_link
+     * "CTS-only hw-flow-control" rule. */
+    uart0_default: uart0_default {
+        group1 { psels = <NRF_PSEL(UART_TX, 1, 2)>, <NRF_PSEL(UART_CTS, 1, 3)>; };
+        group2 { psels = <NRF_PSEL(UART_RX, 1, 4)>; bias-pull-up; };
+    };
+    uart0_sleep: uart0_sleep {
+        group1 {
+            psels = <NRF_PSEL(UART_TX, 1, 2)>, <NRF_PSEL(UART_CTS, 1, 3)>,
+                    <NRF_PSEL(UART_RX, 1, 4)>;
+            low-power-enable;
+        };
+    };
 
     /* LED PWM (mirrors the gold sp1-midi BSP stem_player-pinctrl.dtsi).
-     * PWM2 = track row, PWM3 = side/play row. Channel->pin per the CANONICAL LED map. */
+     * PWM2 = track row, PWM3 = side/play row. Channel->pin per the CANONICAL
+     * LED map in sp1_board.h. */
     pwm2_default: pwm2_default { group1 {
         psels = <NRF_PSEL(PWM_OUT0, 0, 29)>,   /* T1 P0.29 */
                 <NRF_PSEL(PWM_OUT1, 0, 26)>,   /* T2 P0.26 */
@@ -64,8 +63,19 @@
     }; };
 };
 
-/* Enable the two PWM peripherals that drive the 8 LEDs (raw GPIO drive is replaced
- * by led.c). ~1 kHz, active-high normal polarity, so duty% == LED brightness. */
+/* CYW20706 module link UART. 115200 8N1, the module's default framing.
+ * hw-flow-control with a CTS-only pinctrl: TX pauses when the module deasserts
+ * its RTS; the reverse direction (module CTS) is module_link.c's GPIO. */
+&uart0 {
+    compatible = "nordic,nrf-uarte";
+    status = "okay";
+    current-speed = <115200>;
+    hw-flow-control;
+    pinctrl-0 = <&uart0_default>; pinctrl-1 = <&uart0_sleep>; pinctrl-names = "default","sleep";
+};
+
+/* Enable the two PWM peripherals that drive the 8 LEDs. ~1 kHz, active-high
+ * normal polarity, so duty% == LED brightness. */
 &pwm2 {
     status = "okay";
     pinctrl-0 = <&pwm2_default>; pinctrl-1 = <&pwm2_sleep>; pinctrl-names = "default","sleep";
@@ -76,11 +86,9 @@
 };
 
 / {
-    /* pwm-leds container (gold-BSP pattern). led.c references these child labels in
-     * FIXED order: idx 0..3 = track T1..T4, idx 4..7 = side/play LED1..4 (feldd
-     * numbering; see the CANONICAL LED map in sp1_board.h). compatible="pwm-leds"
-     * gives each child's `pwms` a binding (needed for PWM_DT_SPEC_GET); we drive
-     * the channels directly, so CONFIG_LED_PWM is intentionally NOT enabled. */
+    /* pwm-leds container (gold-BSP pattern). led.c references these child
+     * labels in FIXED order: idx 0..3 = track T1..T4, idx 4..7 = side/play
+     * LED1..4 (see the CANONICAL LED map in sp1_board.h). */
     feldd_leds: feldd-leds {
         compatible = "pwm-leds";
         fled_t1: fled_t1 { pwms = <&pwm2 0 PWM_USEC(1024) PWM_POLARITY_NORMAL>; };  /* T1 P0.29 */
@@ -93,31 +101,6 @@
         fled_p4: fled_p4 { pwms = <&pwm3 3 PWM_USEC(1024) PWM_POLARITY_NORMAL>; };  /* PLAY4 P1.13 */
     };
 };
-&uart1 {
-    compatible = "nordic,nrf-uarte"; status = "okay";
-    current-speed = <31250>;
-    pinctrl-0 = <&uart1_default>; pinctrl-1 = <&uart1_sleep>; pinctrl-names = "default","sleep";
-    /* TX-only MIDI out: no RX/RTS/CTS. P0.20 = tip TXD (most-likely; flip to
-     * P0.17 if the bench shows otherwise). Second tip pin P0.17 (parallel
-     * current copy) deferred until one-pin drive proves too weak. */
-};
-
-/* MIDI clock generator (GEN mode): a dedicated nRF hardware TIMER gives the
- * 24-PPQN ticks microsecond precision (clock_timer.c drives it via the Zephyr
- * counter API). Replaces the k_timer whose ~30 us system-tick quantisation
- * jittered the tempo visibly above ~100 BPM. prescaler 4 -> 16 MHz / 2^4 =
- * 1 MHz = 1 us/tick; the 40..240 BPM tick periods (10416..62500 us) sit well
- * inside the counter range. No other feldd code claims a TIMER instance. */
-&timer2 {
-    status = "okay";
-    prescaler = <4>;
-};
-
-/* BT module UART0 (&uart0 enable + current-speed + pinctrl) lives in the BT-only
- * bt_uart0.overlay fragment, NOT here. Enabling &uart0 in this shared overlay would
- * boot-init UARTE0 in the SHIPPED no-BT image (0.24 leaves uart0 disabled). BT builds
- * pull in bt_uart0.overlay via EXTRA_DTC_OVERLAY_FILE (probe/download: bt_uart0.overlay;
- * link: "bt_uart0.overlay;bt_link.overlay" for the added CTS/hw-flow-control). */
 
 &adc {
     status = "okay";
@@ -131,71 +114,14 @@
         zephyr,input-positive=<NRF_SAADC_AIN1>; zephyr,resolution=<12>; };   /* ladder: vol */
     channel@2 { reg=<2>; zephyr,gain="ADC_GAIN_1_6"; zephyr,reference="ADC_REF_INTERNAL";
         zephyr,acquisition-time=<ADC_ACQ_TIME(ADC_ACQ_TIME_MICROSECONDS,20)>;
-        zephyr,input-positive=<NRF_SAADC_AIN3>; zephyr,resolution=<12>; };   /* fader1 P0.05 */
-    channel@3 { reg=<3>; zephyr,gain="ADC_GAIN_1_6"; zephyr,reference="ADC_REF_INTERNAL";
-        zephyr,acquisition-time=<ADC_ACQ_TIME(ADC_ACQ_TIME_MICROSECONDS,20)>;
-        zephyr,input-positive=<NRF_SAADC_AIN6>; zephyr,resolution=<12>; };   /* fader2 P0.30 */
-    channel@4 { reg=<4>; zephyr,gain="ADC_GAIN_1_6"; zephyr,reference="ADC_REF_INTERNAL";
-        zephyr,acquisition-time=<ADC_ACQ_TIME(ADC_ACQ_TIME_MICROSECONDS,20)>;
-        zephyr,input-positive=<NRF_SAADC_AIN2>; zephyr,resolution=<12>; };   /* fader3 P0.04 */
-    channel@5 { reg=<5>; zephyr,gain="ADC_GAIN_1_6"; zephyr,reference="ADC_REF_INTERNAL";
-        zephyr,acquisition-time=<ADC_ACQ_TIME(ADC_ACQ_TIME_MICROSECONDS,20)>;
-        zephyr,input-positive=<NRF_SAADC_AIN7>; zephyr,resolution=<12>; };   /* fader4 P0.31 */
-    channel@6 { reg=<6>; zephyr,gain="ADC_GAIN_1_6"; zephyr,reference="ADC_REF_INTERNAL";
-        zephyr,acquisition-time=<ADC_ACQ_TIME(ADC_ACQ_TIME_MICROSECONDS,20)>;
         zephyr,input-positive=<NRF_SAADC_AIN4>; zephyr,resolution=<12>; };   /* battery P0.28 */
 };
 
 /* The nRF52840 USB device-controller nodelabel is &usbd; there is no
  * zephyr_udc0 alias on this SoC. The sample_usbd helper (sample_usbd_init.c)
- * hard-references DT_NODELABEL(zephyr_udc0), so we attach that extra label here
- * and hang the CDC-ACM console child node off it. */
+ * hard-references DT_NODELABEL(zephyr_udc0), so we attach that extra label
+ * here and hang the CDC-ACM console child node off it. */
 zephyr_udc0: &usbd {
     status = "okay";
     cdc_acm_uart0: cdc_acm_uart0 { compatible = "zephyr,cdc-acm-uart"; };
-
-    /* Studio phase 2a: a first-party Zephyr usbd_hid boot-keyboard function
-     * (usb_hid.c), joining the same sample_usbd composite as the CDC console +
-     * USB-MIDI 1.0. Mirrors samples/subsys/usb/hid-keyboard's hid_dev_0 node: a
-     * standard 8-byte boot-keyboard input report (modifiers, reserved, 6 keycodes),
-     * polled at 1 ms. The driver (usbd_hid.c, compat zephyr,hid-device) builds the
-     * HID interface + a single interrupt-IN endpoint and self-registers into the
-     * composite via usbd_register_all_classes (it is NOT on the helper's blocklist,
-     * which only excludes dfu_dfu). Presence of this node auto-selects
-     * CONFIG_USBD_HID_SUPPORT (default y when DT_HAS_ZEPHYR_HID_DEVICE_ENABLED). */
-    hid_dev_0: hid_dev_0 {
-        compatible = "zephyr,hid-device";
-        label = "FELDD-HID";
-        protocol-code = "keyboard";
-        in-report-size = <8>;
-        in-polling-period-us = <1000>;
-    };
-};
-
-/* M5.2 NVS storage partition for the profile librarian.
- *
- * The marisko board dts (boards/arm/sp1/sp1.dts) declares only
- * bootloader_partition @0 (0x20000) + app_partition @0x20000 (0xBF000).
- * The app *partition* (the linker cap on the app image) ends at 0xDF000, but
- * the SP-1 bootloader's actual writable app slot runs to 0xFEFFF — only the
- * last page 0xFF000..0xFFFFF is reserved. The nRF52840 flash is 1 MB
- * (0x100000). We place NVS at the TOP of usable flash (conventional NVS
- * placement: maximally far from a growing app image, just under the reserved
- * page) — a 32 KB (0x8000) region spanning 0xF7000..0xFF000, ending exactly
- * at the reserved page. It is safe because it sits above the linker-capped app
- * region (ends 0xDF000) and just below the only reserved page (0xFF000).
- *
- * Referencing the &flash0 { partitions { ... }; } path MERGES this child into
- * the marisko-declared `partitions` node (which has no label, so it is reached
- * by node path); the bootloader + app partitions survive and all three appear
- * in the merged zephyr.dts. The node is named partition@f7000 so its
- * unit-address matches its reg offset, and labelled storage_partition so
- * FIXED_PARTITION_*(storage_partition) resolves in librarian.c. */
-&flash0 {
-    partitions {
-        storage_partition: partition@f7000 {
-            label = "storage";
-            reg = <0x000F7000 0x00008000>;
-        };
-    };
 };

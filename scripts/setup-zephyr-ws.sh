@@ -1,9 +1,10 @@
 #!/bin/bash
-# One-time Zephyr/NCS workspace setup for the SP-1 controller firmware (plan M0.1).
+# One-time Zephyr/NCS workspace setup for the SP-1 beacon firmware.
 # Idempotent-ish: re-running skips finished steps. Logs everything; long step is
 # `west update` (multi-GB). Apple Silicon (arm64) assumed.
 set -u
-WS="$HOME/bnjmn/sp-1/.zephyr-ws"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+WS="$ROOT/.zephyr-ws"
 SDK_VER="0.17.0"
 ARCH="aarch64"   # Apple Silicon
 log(){ echo "[$(date +%H:%M:%S)] $*"; }
@@ -53,14 +54,17 @@ if [ -d "$SDK_DIR" ]; then log "  SDK present"; else
   else log "  SDK DOWNLOAD FAILED (see sdk.log) - the minimal tarball name/URL may have changed for $SDK_VER; check https://github.com/zephyrproject-rtos/sdk-ng/releases/tag/v${SDK_VER}"; fi
 fi
 
-log "=== 6/6 verify: board visible ==="
+log "=== 6/7 sp1 board definition (marisko) ==="
+if [ -d "$WS/marisko/.git" ]; then log "  marisko clone present"; else
+  git clone --depth 1 https://github.com/softmodded/marisko "$WS/marisko" >>"$WS/clone.log" 2>&1 \
+    && log "  cloned" || { log "  MARISKO CLONE FAILED (see clone.log)"; exit 1; }
+fi
+
+log "=== 7/7 verify: board visible ==="
 export ZEPHYR_SDK_INSTALL_DIR="$SDK_DIR"
-if west boards --board-root "$HOME/bnjmn/sp-1/reference/related-firmware/marisko" 2>/dev/null | grep -qx sp1; then
+if west boards --board-root "$WS/marisko" 2>/dev/null | grep -qx sp1; then
   log "  SUCCESS: board 'sp1' is visible. Workspace ready."
-  log "  Build the firmware with:"
-  log "    cd $WS && ZEPHYR_SDK_INSTALL_DIR=$SDK_DIR \\"
-  log "      west build -b sp1 -d build $HOME/bnjmn/sp-1/firmware/app -- \\"
-  log "      -DBOARD_ROOT=$HOME/bnjmn/sp-1/reference/related-firmware/marisko"
+  log "  Build the firmware with ./scripts/fw.sh build"
 else
   log "  board 'sp1' NOT yet visible - check the logs in $WS/*.log"
 fi

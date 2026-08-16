@@ -1,6 +1,12 @@
 feldd - third-party components NOTICE
 =====================================
 
+[beacon-sp-1 fork note: this repository is a stripped-down fork of feldd. The
+notice below is inherited from feldd for attribution. Unlike feldd.bin, the
+binary built from THIS repository (sp1_beacon.bin) embeds NO Infineon radio
+firmware — item 1 below applies to feldd's Bluetooth build, not to this tree,
+which contains no radio image or flasher. Items 2-4 still apply.]
+
 feldd is unofficial community firmware for the Teenage Engineering SP-1 /
 Stem Player. The original feldd code in this repository is licensed under the
 MIT License (see LICENSE), which applies ONLY to the original feldd code

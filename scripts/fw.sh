@@ -1,22 +1,22 @@
 #!/bin/bash
-# SP-1 controller firmware dev wrapper - one command for build/package/inspect.
+# SP-1 beacon firmware dev wrapper - one command for build/package/inspect.
 # Hides the long west incantation + the sysbuild/SDK/PATH gotchas.
 #   ./scripts/fw.sh build      pristine build for the sp1 board
 #   ./scripts/fw.sh inc        incremental build (no -p)
-#   ./scripts/fw.sh bin        build + produce the flashable sp1_firmware.bin
+#   ./scripts/fw.sh bin        build + produce the flashable sp1_beacon.bin
 #   ./scripts/fw.sh info       size + link-address sanity of the current build
 #   ./scripts/fw.sh test       run the host unit tests
-#   ./scripts/fw.sh monitor    open the SP-1 CDC serial port (protocol/monitor stream)
+#   ./scripts/fw.sh monitor    open the SP-1 CDC serial console
 #   ./scripts/fw.sh clean      remove the build dir
 set -u
-ROOT="$HOME/bnjmn/sp-1"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 WS="$ROOT/.zephyr-ws"
 SDK="$WS/zephyr-sdk-0.17.0"
 APP="$ROOT/firmware/app"
-BOARD_ROOT="$ROOT/reference/related-firmware/marisko"
+BOARD_ROOT="$WS/marisko"                  # sp1 board def (cloned by setup-zephyr-ws.sh)
 BUILD="$WS/build"
 ELF="$BUILD/app/zephyr/zephyr.elf"        # NCS sysbuild path (note the app/ segment)
-BIN_OUT="$APP/sp1_firmware.bin"
+BIN_OUT="$APP/sp1_beacon.bin"
 export PATH="$HOME/Library/Python/3.14/bin:$SDK/arm-zephyr-eabi/bin:$PATH"
 OBJCOPY="$SDK/arm-zephyr-eabi/bin/arm-zephyr-eabi-objcopy"
 OBJDUMP="$SDK/arm-zephyr-eabi/bin/arm-zephyr-eabi-objdump"
@@ -51,5 +51,5 @@ case "${1:-}" in
            [ -n "$port" ] && { echo "opening $port (ctrl-a k to quit screen)"; screen "$port" 115200; } \
              || echo "no /dev/cu.usbmodem* - is the SP-1 plugged in and flashed?" ;;
   clean)   rm -rf "$BUILD" && echo "cleaned $BUILD" ;;
-  *) sed -n '2,12p' "$0" ;;
+  *) sed -n '2,11p' "$0" ;;
 esac
