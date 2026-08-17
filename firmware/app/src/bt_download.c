@@ -17,12 +17,17 @@
 #include "wiced_hci.h"
 #include "usbdev.h"
 #include "wdt.h"
+#include "controls.h"
+#include "buttons.h"
+#include "led.h"
+#include "sp1_board.h"
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
 #include <zephyr/devicetree.h>
 #include <zephyr/drivers/uart.h>
 #include <zephyr/sys/printk.h>
 #include <hal/nrf_gpio.h>
+#include <nrfx.h>   /* NRF_POWER, NVIC_SystemReset, __DSB (DFU escape) */
 
 #include "cybt_blobs.h"   /* generated, gitignored: cybt_minidriver[], cybt_ds_image[], addrs */
 
@@ -446,11 +451,32 @@ void bt_download_run(void)
 #endif
 
 halt:
-    printk("DL: halted. Power-cycle to boot the module's current app.\n");
+    printk("DL: halted. Hold Track 1+4 (~1 s) for DFU, or power-cycle.\n");
+    /* ESCAPE HATCH: the flasher runs no control loop, so without this a halted
+     * flasher has no way back to the bootloader (no •• power-off, no button
+     * scan) — you'd have to drain the battery. Poll the TRACKS ladder for the
+     * Track1+4 DFU combo and reset into the bootloader on a ~1 s hold, the same
+     * gesture the normal build uses. controls_init() powers the ladder rail +
+     * SAADC (its pins don't overlap the module UART). */
+    controls_init();
+    int dfu_cnt = 0;
     for (;;) {
-        feed_wdt();   /* sit quietly at halt — do NOT let the WDT reset us into
-                       * a re-run bootloop (the bug that made every monitor
-                       * session replay the sequence) */
-        k_msleep(1000);
+        feed_wdt();
+        if (buttons_in_dfu_band_pure(controls_read_raw(0))) {
+            if (++dfu_cnt >= 10) {         /* ~1 s at 100 ms/poll */
+                /* Light the track row as confirmation (no other LED feedback
+                 * in this build), then reset into the TE bootloader. */
+                led_pin(SP1_TRACK_LED1, true);
+                led_pin(SP1_TRACK_LED2, true);
+                led_pin(SP1_TRACK_LED3, true);
+                led_pin(SP1_TRACK_LED4, true);
+                NRF_POWER->GPREGRET = 0x57u;
+                __DSB();
+                NVIC_SystemReset();
+            }
+        } else {
+            dfu_cnt = 0;
+        }
+        k_msleep(100);
     }
 }

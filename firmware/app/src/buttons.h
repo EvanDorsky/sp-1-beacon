@@ -18,6 +18,11 @@ int  buttons_dfu_held(void);
 int  buttons_rail_loaded(void);
 /* Rail-load class (0/1/2) from two raw ladder reads. Pure, host-testable. */
 int  buttons_rail_class_pure(int trk_raw, int vol_raw);
+
+/* True if a raw TRACKS-ladder read sits in the Track1+4 DFU-combo band. Pure;
+ * exposed so the module-flasher build can offer a Track1+4 -> DFU escape in
+ * its halt loop without pulling in the full scan machinery. */
+int  buttons_in_dfu_band_pure(int v);
 /* Fresh instantaneous rail-load class, re-read NOW (two ladder ADC reads). Call
    right before the fader read to close the intra-tick press race. */
 int  buttons_rail_probe(void);
