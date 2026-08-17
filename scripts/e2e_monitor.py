@@ -36,6 +36,25 @@ except ImportError:
 
 BLE_MIDI_UUID = "03b80e5a-ede8-4b33-a751-6ce34ec4c700"
 
+# The sp1-beacon module app (M3b+) broadcasts manufacturer data instead:
+# company 0xFFFF (SIG internal-use), then the 9-byte beacon_state payload
+# (version, seq, buttons u16 LE, 4x fader u8, battery). Decode it live.
+SP1_COMPANY_ID = 0xFFFF
+SP1_STATE_VER = 1
+BTN_NAMES = ["PLAY", "T1", "T2", "T3", "T4", "VOL+", "VOL-", "FWD", "RWD"]
+
+
+def decode_state(mfr: dict):
+    payload = mfr.get(SP1_COMPANY_ID)
+    if not payload or len(payload) < 9 or payload[0] != SP1_STATE_VER:
+        return None
+    buttons = payload[2] | (payload[3] << 8)
+    held = [BTN_NAMES[i] for i in range(9) if buttons & (1 << i)] or ["-"]
+    batt = payload[8]
+    return (f"seq={payload[1]} btn={'+'.join(held)} "
+            f"faders={payload[4]}/{payload[5]}/{payload[6]}/{payload[7]} "
+            f"batt={'?' if batt == 0xFF else batt}")
+
 # A gap this long with no sighting ends the burst. The firmware's burst is ~2 s
 # of advertising at a fast interval, so intra-burst gaps stay well under this.
 BURST_GAP_S = 1.5
@@ -54,11 +73,14 @@ class BurstWatch:
         self.sightings = 0
         self.last_rssi = None
         self.bursts = 0
+        self.last_state = None      # decoded sp1 state, printed on change
 
     def matches(self, device, adv) -> bool:
+        if decode_state(adv.manufacturer_data or {}) is not None:
+            return True                       # sp1-beacon state broadcast
         local = (adv.local_name or device.name or "").lower()
         if local == self.name:
-            return True
+            return True                       # feldd-era presence beacon
         return any(u.lower() == BLE_MIDI_UUID for u in (adv.service_uuids or []))
 
     def on_detect(self, device, adv) -> None:
@@ -69,12 +91,16 @@ class BurstWatch:
         if not self.matches(device, adv):
             return
         self.last_rssi = adv.rssi
+        state = decode_state(adv.manufacturer_data or {})
         if self.burst_start is None:
             self.bursts += 1
             self.sightings = 0
             self.burst_start = now
-            print(f"{stamp()}  BURST #{self.bursts} on the air  "
-                  f"name={adv.local_name or device.name!r} rssi={adv.rssi}")
+            what = state or f"name={adv.local_name or device.name!r}"
+            print(f"{stamp()}  BURST #{self.bursts} on the air  {what} rssi={adv.rssi}")
+        elif state and state != self.last_state:
+            print(f"{stamp()}    {state} rssi={adv.rssi}")
+        self.last_state = state
         self.sightings += 1
         self.last_seen = now
 
