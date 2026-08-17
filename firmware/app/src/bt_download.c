@@ -444,6 +444,9 @@ void bt_download_run(void)
 halt:
     printk("DL: halted. Power-cycle to boot the module's current app.\n");
     for (;;) {
+        feed_wdt();   /* sit quietly at halt — do NOT let the WDT reset us into
+                       * a re-run bootloop (the bug that made every monitor
+                       * session replay the sequence) */
         k_msleep(1000);
     }
 }
