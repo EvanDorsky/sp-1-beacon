@@ -20,32 +20,33 @@ method, and the hardware evidence live in [`bluetooth/`](bluetooth) (inherited
 from feldd — read `bluetooth/README.md` first, and mind its safety headline:
 **never chip-erase the module**).
 
-## Status: M1 + M2 (bench bring-up)
+## Status: M3a (broadcast state machine, nRF side)
 
-Current firmware assumes the module already carries **feldd's BLE-MIDI/HID
-module app** (flashed by feldd 0.27+). It exercises that app's private
-WICED-HCI command group:
+The firmware is now the product's shape: the SP-1 idles in low power (radio in
+reset, LEDs dark, the control rail duty-cycled around a ~40 ms scan) and wakes
+on **any activity — a button held or a fader moved**. While awake it
+broadcasts the full control state and refreshes it on every change; ~5 s after
+the last activity it goes back to sleep. Faders freeze at last-good while a
+button is held (a pressed button sags the shared rail and corrupts fader
+reads — feldd's bench finding); fader moves register whenever no button is
+down, including from idle, where a move alone wakes the radio.
 
-| Control | Action |
-|---------|--------|
-| Play, Track 1–4, FWD | ~2 s **advertising burst** — the over-the-air E2E event (boots the module first if needed; Track N also lights its LED) |
-| Any press except RWD | additionally PINGs the module app over the wired UART (console liveness) |
-| Vol + | Advertising on, no auto-stop |
-| Vol − | Advertising off / cancel burst |
-| RWD | Module into reset (BT hard-off) |
-| •• hold ~5 s | Power off (SYSTEM_OFF; •• wakes) |
-| Track 1+4 hold ~1.2 s | DFU — reboot into the TE bootloader for reflashing |
+The wire payload (`beacon_state.h`, 9 bytes): version, seq, a 9-bit button
+bitmap, four 8-bit faders, battery percent. It is pushed to the module with a
+private `SET_STATE` WICED-HCI command that the **M3b beacon module app** will
+embed in a non-connectable advertisement. Until that app is flashed, the
+module still runs feldd's BLE-MIDI app, which ignores `SET_STATE` — so today a
+wake broadcasts feldd's presence advertisement instead (same state machine,
+same timing, same power behavior; `./scripts/fw.sh e2e` sees it on the air).
 
-Every button edge and every WICED-HCI frame (both directions) is logged on the
-USB-CDC console (`./scripts/fw.sh monitor`). For end-to-end testing over the
-air, `./scripts/fw.sh e2e` runs `scripts/e2e_monitor.py` (needs `pip3 install
-bleak`), which BLE-scans for the module's advertisements and prints one line
-per burst — press a button, see the burst arrive by radio. No pairing needed.
+Extras that survive from the bring-up builds: `•• hold ~5 s` = power off (••
+wakes), a short `••` tap logs full state to the console, `Track 1+4` held ~3 s
+= DFU escape into the TE bootloader, and the USB console only comes up when a
+cable is present (idle power).
 
-Planned next (see the milestone plan in the project discussion): a dedicated
-beacon module app (non-connectable advertising with a per-button payload), the
-SS-preserving module reflash path rebuilt from the docs in `bluetooth/`, and
-the low-power idle (module held in reset, relaxed scan cadence).
+Next: **M3b** the CYW20706 beacon app (ModusToolbox), **M4** the SS-preserving
+module reflash rebuilt from the docs in `bluetooth/`, **M5** the ESP32/HomeSpan
+receiver, **M6** power measurement + tuning.
 
 ## Building
 

@@ -1,24 +1,28 @@
 /*
- * main.c — SP-1 BLE beacon firmware (M1+M2 bring-up build).
+ * main.c — SP-1 BLE beacon firmware (M3a: the broadcast state machine).
  *
- * A stripped-down descendant of feldd's controller firmware: the SP-1's 9
- * buttons drive the onboard CYW20706 Bluetooth module (running the feldd BLE
- * module app) over WICED-HCI. This build's job is the bench bring-up:
+ * The SP-1 spends its life in a low-power idle: the CYW20706 radio held in
+ * reset, LEDs dark, and a slow scan (~every 40 ms) that raises the BTN_COM
+ * rail just long enough to sample the two button ladders and the four faders,
+ * then drops it again. Any activity — a button held OR a fader moved past the
+ * deadband — wakes the radio and broadcasts the full control state
+ * (beacon_state.h payload) as a BLE advertisement, refreshed on every change,
+ * until things have been quiet for LINGER_MS. Then back to idle.
  *
- *   - M1: buttons scan + debounce (ladder ADC), every edge logged on the
- *     USB-CDC console, with the boot-safety conventions kept intact (links
- *     above the TE bootloader, Track1+4 DFU escape, charge-standby gate,
- *     charger /CE enable, •• 5 s hold = power off).
- *   - M2: drive the module's flashed app: PLAY = PING, Track1..4 = a ~2 s
- *     advertising burst (presence beacon), VolUp/VolDn = ADV on/off,
- *     FWD/RWD = module boot / module reset. All module frames are hex-logged.
+ * While a button is held it sags the shared BTN_COM rail and corrupts fader
+ * reads (feldd's bench finding), so fader values FREEZE at last-good while the
+ * rail is loaded; fader moves are picked up whenever no button is down —
+ * including in idle, where a fader move alone wakes the radio.
  *
- * Button map (BTN_COUNT indices from buttons.h):
- *   0 PLAY  -> PING          1..4 Track1..4 -> ADV burst (~2 s)
- *   5 VolUp -> ADV on        6 VolDn        -> ADV off
- *   7 FWD   -> module on     8 RWD          -> module off (reset)
- *   ••  5 s hold -> power off (SYSTEM_OFF; •• press wakes)
- *   Track1+4 held ~1.2 s -> DFU (bootloader re-flash escape hatch)
+ * Module app note: until the M3b beacon app is flashed, the module still runs
+ * feldd's BLE-MIDI app — it ignores SET_STATE, so on today's hardware a wake
+ * broadcasts feldd's presence advertisement (via the ADV command) instead of
+ * the state payload. The state machine, timing, and power behavior are
+ * identical either way, which is what M3a is for.
+ *
+ * Boot safety (kept from feldd): links above the TE bootloader, charge-standby
+ * gate, charger /CE enable, Track1+4 DFU escape (~3 s at the 20 ms scan), ••
+ * 5 s hold = power off / •• wake.
  */
 #include <zephyr/kernel.h>
 #include <zephyr/sys/printk.h>
@@ -32,6 +36,7 @@
 #include "usbdev.h"
 #include "module_link.h"
 #include "wiced_hci.h"
+#include "beacon_state.h"
 #include "wdt.h"
 
 /* ---- watchdog (verbatim from feldd: ~8 s hang backstop, fed per tick) ---- */
@@ -82,8 +87,7 @@ static void power_off(void)
     for (int i = 0; i < LED_COUNT; i++) {
         led_idx(i, false);
     }
-    nrf_gpio_cfg_output(SP1_BTN_COM);   /* stop powering the ladders */
-    nrf_gpio_pin_clear(SP1_BTN_COM);
+    controls_rail(0);                   /* stop powering the ladders/faders */
 
     /* •• is still held (we get here after a long hold). Arming sense-low now
      * would re-wake instantly, so wait for release first, feeding the WDT. */
@@ -99,8 +103,8 @@ static void power_off(void)
     for (;;) { }
 }
 
-/* ---- FAILSAFE recovery (Track1+4 held ~1.2 s): reset into the TE bootloader
- * so the device can ALWAYS be reflashed. Verbatim from feldd/looper. ---- */
+/* ---- FAILSAFE recovery (Track1+4 held): reset into the TE bootloader so the
+ * device can ALWAYS be reflashed. Verbatim from feldd/looper. ---- */
 
 static void enter_dfu(void)
 {
@@ -114,7 +118,7 @@ static void enter_dfu(void)
     for (;;) { }
 }
 
-/* ---- battery gauge for the charge-standby park (calibration from feldd) ---- */
+/* ---- battery gauge (calibration from feldd) ---- */
 
 #define BATT_RAW_EMPTY 1962
 #define BATT_RAW_FULL  2378
@@ -145,12 +149,10 @@ static void charge_gauge(int pct, int chg, uint32_t blink)
     }
 }
 
-/* CHARGE-STANDBY GATE (kept from feldd, which mirrors the looper): the TE
- * bootloader hands us control on ANY power event — •• power-on, but also a bare
- * USB plug-in or a battery insert. Only a •• wake (RESETREAS.OFF) or a watchdog
- * recovery (RESETREAS.DOG) is a real turn-on; for everything else, park showing
- * the battery gauge (on USB) or drop to SYSTEM_OFF (on battery) so a full boot
- * can never brown-out-thrash a low cell. Returns only on a real turn-on. */
+/* CHARGE-STANDBY GATE (kept from feldd/looper): only a •• wake or a watchdog
+ * recovery is a real turn-on; for every other power event, park showing the
+ * battery gauge (on USB) or drop to SYSTEM_OFF (on battery) so a full boot can
+ * never brown-out-thrash a low cell. Returns only on a real turn-on. */
 static void charge_standby_gate(uint32_t wake_reas)
 {
     if (wake_reas & (POWER_RESETREAS_OFF_Msk | POWER_RESETREAS_DOG_Msk)) {
@@ -179,10 +181,10 @@ static void charge_standby_gate(uint32_t wake_reas)
             if (!adc_up) {
                 controls_init();
                 led_set_brightness(LED_BRIGHTNESS_FULL);
-                last_raw = controls_read_raw(2);      /* battery */
+                last_raw = controls_read_raw(6);      /* battery */
                 adc_up = 1;
             } else if ((tick % 50u) == 0u) {
-                last_raw = controls_read_raw(2);
+                last_raw = controls_read_raw(6);
             }
             charge_gauge(battery_pct(last_raw), charging(), tick);
         }
@@ -206,117 +208,88 @@ static void boot_signature(void)
     }
 }
 
-/* ---- M2 behavior: buttons -> module commands ---- */
+/* ---- the broadcast state machine ---- */
 
-#define TICK_MS         8
-#define ADV_BURST_TICKS (2000 / TICK_MS)       /* ~2 s presence-beacon burst */
-#define FUNC_OFF_TICKS  (5000 / TICK_MS)       /* •• hold-to-power-off */
+#define POLL_IDLE_MS    40      /* idle scan cadence (rail duty-cycled) */
+#define POLL_ON_MS      20      /* active scan cadence (rail held on) */
+#define RAIL_SETTLE_US  500     /* rail-up to first sample. BENCH-TUNE: if idle
+                                 * scans misread (phantom wakes / missed
+                                 * presses), this is the first knob. */
+#define LINGER_MS       5000    /* keep broadcasting this long after the last
+                                 * activity before going back to sleep */
+#define WAKE_TIMEOUT_MS 3000    /* module boot watchdog: give up and retry */
+#define KEEPALIVE_MS    1000    /* re-send the unchanged state this often */
+#define BATT_PERIOD_MS  5000    /* battery sample cadence while awake */
+#define FUNC_OFF_TICKS  (5000 / POLL_ON_MS)
+
+enum bc_state { BC_IDLE, BC_WAKE, BC_ON };
 
 static const char *const btn_name[BTN_COUNT] = {
     "PLAY", "T1", "T2", "T3", "T4", "VOL+", "VOL-", "FWD", "RWD",
 };
 
-static int      adv_ticks;      /* >0: burst in flight, counts down */
-static int      adv_track;      /* which track LED is lit for the burst, -1 none */
-static bool     adv_pending;    /* burst requested while the module was booting */
-static int      adv_pending_track = -1;
-static bool     ping_pending;   /* ping requested while the module was booting */
+static enum bc_state bc = BC_IDLE;
+static struct beacon_state st;         /* live control state */
+static struct beacon_state last_sent;  /* what's currently on the air */
+static uint8_t seq;
+static int64_t wake_t, activity_t, last_send_t, last_batt_t;
 
-/* Start a ~2 s advertising burst (track_idx 0..3 lights that track LED, -1
- * lights none). If the module is still booting, the burst is queued and fires
- * on UP. */
-static void adv_burst_start(int track_idx)
+static void state_send(void)
 {
-    if (module_link_state() != MODULE_UP) {
-        adv_pending = true;
-        adv_pending_track = track_idx;
-        module_link_power(true);        /* boots the app; burst fires on UP */
-        return;
-    }
-    (void)module_link_adv(true);
-    adv_ticks = ADV_BURST_TICKS;
-    if (adv_track >= 0) {
-        led_idx(adv_track, false);
-    }
-    adv_track = track_idx;
-    if (adv_track >= 0) {
-        led_idx(adv_track, true);
-    }
+    uint8_t payload[BEACON_STATE_LEN];
+
+    (void)beacon_state_encode(&st, seq, payload, sizeof(payload));
+    (void)module_link_send(WHCI_FELDD_SET_STATE, payload, BEACON_STATE_LEN);
+    last_sent = st;
+    last_send_t = k_uptime_get();
 }
 
-static void adv_burst_cancel(bool send_stop)
+/* Scan buttons + faders into st. Fader reads are gated on the rail being
+ * unloaded (a held button sags the rail and corrupts them: they freeze at
+ * last-good instead). Returns 1 if any button event fired this tick. */
+static int scan_controls(void)
 {
-    adv_ticks = 0;
-    adv_pending = false;
-    adv_pending_track = -1;
-    if (send_stop) {
-        (void)module_link_adv(false);
-    }
-    if (adv_track >= 0) {
-        led_idx(adv_track, false);
-        adv_track = -1;
-    }
-}
+    struct button_event evt[BTN_COUNT];
+    int n = buttons_scan(evt, BTN_COUNT);
 
-static void adv_burst_tick(void)
-{
-    /* Work asked for before the app was up fires as soon as it is. */
-    if (ping_pending && module_link_state() == MODULE_UP) {
-        ping_pending = false;
-        (void)module_link_ping();
-    }
-    if (adv_pending && module_link_state() == MODULE_UP) {
-        adv_pending = false;
-        adv_burst_start(adv_pending_track);
-    }
-    if (adv_ticks > 0 && --adv_ticks == 0) {
-        (void)module_link_adv(false);
-        if (adv_track >= 0) {
-            led_idx(adv_track, false);
-            adv_track = -1;
-        }
-    }
-}
-
-static void handle_button(const struct button_event *e)
-{
-    printk("BTN %s %s\n", btn_name[e->idx], e->pressed ? "down" : "up");
-    if (!e->pressed) {
-        return;
-    }
-    /* E2E liveness: EVERY press (except RWD, the module-off switch) pings the
-     * module app, booting it first if needed. The app's reply (its READY event)
-     * closes the wired button -> nRF -> module -> nRF loop on the console. */
-    if (e->idx != 8) {
-        if (module_link_state() == MODULE_UP) {
-            (void)module_link_ping();
+    for (int i = 0; i < n; i++) {
+        printk("BTN %s %s\n", btn_name[evt[i].idx], evt[i].pressed ? "down" : "up");
+        if (evt[i].pressed) {
+            st.buttons |= (uint16_t)(1u << evt[i].idx);
         } else {
-            ping_pending = true;
-            module_link_power(true);          /* no-op unless the module is off */
+            st.buttons &= (uint16_t)~(1u << evt[i].idx);
         }
     }
-    switch (e->idx) {
-    case 0: case 1: case 2: case 3: case 4:   /* PLAY + Track N: ADV burst — the
-                                               * OVER-THE-AIR E2E event that
-                                               * scripts/e2e_monitor.py sees */
-    case 7:                                   /* FWD too (also boots the module) */
-        adv_burst_start(e->idx >= 1 && e->idx <= 4 ? e->idx - 1 : -1);
-        break;
-    case 5:                                   /* Vol+: advertising ON, no auto-stop */
-        adv_burst_cancel(false);
-        (void)module_link_adv(true);
-        break;
-    case 6:                                   /* Vol-: advertising off / cancel burst */
-        adv_burst_cancel(true);
-        break;
-    case 8:                                   /* RWD: module into reset */
-        module_link_power(false);
-        adv_burst_cancel(false);              /* reset kills adv; nothing to send */
-        ping_pending = false;
-        break;
-    default:
-        break;
+
+    if (!buttons_rail_probe()) {           /* rail clean: faders are trustworthy */
+        for (int i = 0; i < 4; i++) {
+            int raw = controls_read_raw(2 + i);
+            if (raw >= 0) {
+                st.fader[i] = (uint8_t)(raw >> 4);
+            }
+        }
     }
+    return n;
+}
+
+static void bc_go_idle(void)
+{
+    (void)module_link_adv(false);          /* courtesy; the reset kills it anyway */
+    module_link_power(false);
+    controls_rail(0);
+    led_pin(SP1_LED1, false);
+    bc = BC_IDLE;
+    printk("BC: idle (rail duty-cycled, module in reset)\n");
+}
+
+static void bc_wake(const char *why)
+{
+    printk("BC: wake (%s)\n", why);
+    controls_rail(1);                      /* rail stays on while awake */
+    module_link_power(true);
+    wake_t = k_uptime_get();
+    activity_t = wake_t;
+    bc = BC_WAKE;
 }
 
 int main(void)
@@ -343,31 +316,98 @@ int main(void)
 
     controls_init();
     buttons_init();
-    usbdev_start();             /* USB-CDC console */
     module_link_init();         /* UART up; module stays in reset until asked */
 
-    printk("sp1-beacon M1/M2 bring-up (wake=%08x)\n", wake_reas);
+    /* USB is the console, but it's also idle-power poison — only bring it up
+     * when VBUS is actually present (bench). On battery it stays down; if the
+     * cable appears later, the loop below starts it then. */
+    int usb_up = 0;
+    if (usb_present()) {
+        usb_up = (usbdev_start() == 0);
+    }
 
+    printk("sp1-beacon M3a (wake=%08x)\n", wake_reas);
+
+    st.battery = BEACON_BATTERY_UNKNOWN;
+    last_sent = st;
     uint32_t func_held = 0;
     int      func_armed = 0;    /* honor •• only after it has read released once */
-    adv_track = -1;
+    bc_go_idle();
 
     for (;;) {
         feed_wdt();
 
-        struct button_event evt[BTN_COUNT];
-        int n = buttons_scan(evt, BTN_COUNT);
-        for (int i = 0; i < n; i++) {
-            handle_button(&evt[i]);
+        if (!usb_up && usb_present()) {
+            usb_up = (usbdev_start() == 0);
         }
 
+        /* ---- sample the controls (rail handling depends on state) ---- */
+        if (bc == BC_IDLE) {
+            controls_rail(1);
+            k_busy_wait(RAIL_SETTLE_US);
+            scan_controls();
+            int loaded = buttons_rail_probe();
+            controls_rail(0);
+
+            /* Wake on ANY activity: a (even not-yet-debounced) button on the
+             * rail, a committed button, or a fader moved past the deadband. */
+            if (loaded || st.buttons != 0) {
+                bc_wake("button");
+            } else if (beacon_state_changed(&last_sent, &st)) {
+                bc_wake("fader");
+            }
+        } else {
+            scan_controls();
+        }
+
+        /* ---- advance the machine ---- */
+        module_link_poll();
+
+        if (bc == BC_WAKE) {
+            if (module_link_state() == MODULE_UP) {
+                printk("BC: on (module boot %d ms)\n", (int)(k_uptime_get() - wake_t));
+                (void)module_link_adv(true);   /* feldd-app compat: presence beacon */
+                seq++;
+                state_send();
+                last_batt_t = 0;               /* force a battery sample soon */
+                bc = BC_ON;
+            } else if (k_uptime_get() - wake_t > WAKE_TIMEOUT_MS) {
+                printk("BC: module boot timeout, retrying via idle\n");
+                module_link_power(false);
+                bc_go_idle();                  /* still-held buttons re-wake next tick */
+            }
+        } else if (bc == BC_ON) {
+            int64_t now = k_uptime_get();
+
+            if (now - last_batt_t > BATT_PERIOD_MS) {
+                last_batt_t = now;
+                int pct = battery_pct(controls_read_raw(6));
+                if (pct >= 0) {
+                    st.battery = (uint8_t)pct;
+                }
+            }
+            if (st.buttons != 0) {
+                activity_t = now;              /* holding counts as activity */
+            }
+            if (beacon_state_changed(&last_sent, &st)) {
+                seq++;
+                state_send();
+                activity_t = now;
+            } else if (now - last_send_t > KEEPALIVE_MS) {
+                state_send();                  /* same seq: a refresh, not news */
+            }
+            if (now - activity_t > LINGER_MS) {
+                bc_go_idle();
+            }
+        }
+
+        /* ---- housekeeping ---- */
         if (buttons_dfu_held()) {
             printk("DFU combo: rebooting into the bootloader\n");
             enter_dfu();
         }
 
-        /* •• long-hold = power off (short taps just log; the tap band is free
-         * for future gestures). */
+        /* •• long-hold = power off; short tap logs status (+ pings when up). */
         if (nrf_gpio_pin_read(SP1_FUNC_BTN) == 0) {
             if (func_armed && ++func_held >= FUNC_OFF_TICKS) {
                 printk("•• held: powering off\n");
@@ -375,19 +415,22 @@ int main(void)
             }
         } else {
             if (func_held > 0 && func_held < FUNC_OFF_TICKS / 4) {
-                printk("•• tap (module=%d)\n", (int)module_link_state());
+                printk("•• tap: bc=%d module=%d buttons=%03x faders=%u/%u/%u/%u batt=%u seq=%u\n",
+                       (int)bc, (int)module_link_state(), st.buttons,
+                       st.fader[0], st.fader[1], st.fader[2], st.fader[3],
+                       st.battery, seq);
+                if (module_link_state() == MODULE_UP) {
+                    (void)module_link_ping();
+                }
             }
             func_held = 0;
             func_armed = 1;
         }
 
-        module_link_poll();
-        adv_burst_tick();
+        /* Side LED 4: on while broadcasting. */
+        led_pin(SP1_LED1, bc == BC_ON);
 
-        /* Side LED 4 mirrors the module: on = app UP, off = in reset. */
-        led_pin(SP1_LED1, module_link_state() == MODULE_UP);
-
-        k_msleep(TICK_MS);
+        k_msleep(bc == BC_IDLE ? POLL_IDLE_MS : POLL_ON_MS);
     }
     return 0;
 }

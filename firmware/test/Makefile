@@ -1,6 +1,6 @@
 SRC=../app/src
 CFLAGS=-Wall -Wextra -I$(SRC)
-TESTS=test_buttons test_wiced_hci
+TESTS=test_buttons test_wiced_hci test_beacon_state
 
 test: $(TESTS)
 	@for t in $(TESTS); do echo "== $$t =="; ./$$t || exit 1; done
@@ -10,6 +10,9 @@ test_buttons: test_buttons.c $(SRC)/buttons.c $(SRC)/buttons.h
 
 test_wiced_hci: test_wiced_hci.c $(SRC)/wiced_hci.c $(SRC)/wiced_hci.h
 	$(CC) $(CFLAGS) -o $@ test_wiced_hci.c $(SRC)/wiced_hci.c
+
+test_beacon_state: test_beacon_state.c $(SRC)/beacon_state.c $(SRC)/beacon_state.h
+	$(CC) $(CFLAGS) -o $@ test_beacon_state.c $(SRC)/beacon_state.c
 
 clean:
 	rm -f $(TESTS)

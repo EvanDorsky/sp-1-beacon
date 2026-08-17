@@ -6,10 +6,10 @@
 
 / {
     zephyr,user {
-        /* idx: 0=ladder tracks(AIN0), 1=ladder vol(AIN1), 2=battery(AIN4).
-         * (feldd's 4 fader channels are dropped — the beacon firmware reads
-         * no faders.) */
-        io-channels = <&adc 0>, <&adc 1>, <&adc 2>;
+        /* idx: 0=ladder tracks(AIN0), 1=ladder vol(AIN1), 2..5=faders1..4
+         * (AIN3,6,2,7), 6=battery(AIN4) — the looper's verified map, same
+         * order as feldd. */
+        io-channels = <&adc 0>, <&adc 1>, <&adc 2>, <&adc 3>, <&adc 4>, <&adc 5>, <&adc 6>;
     };
     chosen { zephyr,console = &cdc_acm_uart0; };
 };
@@ -113,6 +113,18 @@
         zephyr,acquisition-time=<ADC_ACQ_TIME(ADC_ACQ_TIME_MICROSECONDS,20)>;
         zephyr,input-positive=<NRF_SAADC_AIN1>; zephyr,resolution=<12>; };   /* ladder: vol */
     channel@2 { reg=<2>; zephyr,gain="ADC_GAIN_1_6"; zephyr,reference="ADC_REF_INTERNAL";
+        zephyr,acquisition-time=<ADC_ACQ_TIME(ADC_ACQ_TIME_MICROSECONDS,20)>;
+        zephyr,input-positive=<NRF_SAADC_AIN3>; zephyr,resolution=<12>; };   /* fader1 P0.05 */
+    channel@3 { reg=<3>; zephyr,gain="ADC_GAIN_1_6"; zephyr,reference="ADC_REF_INTERNAL";
+        zephyr,acquisition-time=<ADC_ACQ_TIME(ADC_ACQ_TIME_MICROSECONDS,20)>;
+        zephyr,input-positive=<NRF_SAADC_AIN6>; zephyr,resolution=<12>; };   /* fader2 P0.30 */
+    channel@4 { reg=<4>; zephyr,gain="ADC_GAIN_1_6"; zephyr,reference="ADC_REF_INTERNAL";
+        zephyr,acquisition-time=<ADC_ACQ_TIME(ADC_ACQ_TIME_MICROSECONDS,20)>;
+        zephyr,input-positive=<NRF_SAADC_AIN2>; zephyr,resolution=<12>; };   /* fader3 P0.04 */
+    channel@5 { reg=<5>; zephyr,gain="ADC_GAIN_1_6"; zephyr,reference="ADC_REF_INTERNAL";
+        zephyr,acquisition-time=<ADC_ACQ_TIME(ADC_ACQ_TIME_MICROSECONDS,20)>;
+        zephyr,input-positive=<NRF_SAADC_AIN7>; zephyr,resolution=<12>; };   /* fader4 P0.31 */
+    channel@6 { reg=<6>; zephyr,gain="ADC_GAIN_1_6"; zephyr,reference="ADC_REF_INTERNAL";
         zephyr,acquisition-time=<ADC_ACQ_TIME(ADC_ACQ_TIME_MICROSECONDS,20)>;
         zephyr,input-positive=<NRF_SAADC_AIN4>; zephyr,resolution=<12>; };   /* battery P0.28 */
 };

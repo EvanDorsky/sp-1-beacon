@@ -11,6 +11,7 @@ include(${ZEPHYR_BASE}/samples/subsys/usb/common/common.cmake)
 #   usbdev.c                — CDC-ACM console bring-up
 #   wiced_hci.c             — pure WICED-HCI wire codec (host-tested)
 #   module_link.c           — CYW20706 runtime link: reset sequencing + UART0
+#   beacon_state.c          — the state-beacon payload codec (host-tested)
 target_sources(app PRIVATE
     src/main.c
     src/buttons.c
@@ -18,4 +19,5 @@ target_sources(app PRIVATE
     src/led.c
     src/usbdev.c
     src/wiced_hci.c
-    src/module_link.c)
+    src/module_link.c
+    src/beacon_state.c)

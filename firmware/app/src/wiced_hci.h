@@ -32,6 +32,11 @@
 #define WHCI_FELDD_PING       0x03
 #define WHCI_FELDD_ADV        0x04
 #define WHCI_FELDD_CLEAR_BONDS 0x05
+/* beacon-sp-1 extension (the M3b CYW20706 beacon app): payload is the
+ * BEACON_STATE_LEN state-beacon bytes (beacon_state.h); the app embeds them
+ * in a non-connectable advertisement and (re)starts advertising. feldd's
+ * shipped module app ignores this code, so sending it is always harmless. */
+#define WHCI_FELDD_SET_STATE  0x10
 
 #define WHCI_OPCODE(group, code) ((uint16_t)(((uint16_t)(group) << 8) | (code)))
 #define WHCI_GROUP(opcode)       ((uint8_t)((opcode) >> 8))

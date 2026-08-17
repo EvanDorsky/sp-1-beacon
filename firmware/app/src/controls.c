@@ -1,13 +1,14 @@
 /*
- * controls.c — SAADC read of the SP-1's 2 button ladders + battery.
+ * controls.c — SAADC read of the SP-1's 2 button ladders + 4 faders + battery.
  *
  * The PLAY/track and Vol/FWD/RWD buttons are resistor ladders read on the
- * SAADC; the battery rides an on-board divider. All of these are only powered
- * when BTN_COM (P1.10) is driven high, so we raise that rail at init before
- * any sampling. Channel order matches the zephyr,user io-channels list in
+ * SAADC; the faders are linear pots; the battery rides an on-board divider.
+ * All of these are only powered when BTN_COM (P1.10) is driven high. The
+ * beacon firmware DUTY-CYCLES that rail (controls_rail) so the fader pots
+ * don't bleed current around the clock in idle: raise it, settle, sample,
+ * drop it. Channel order matches the zephyr,user io-channels list in
  * app.overlay (the chattock looper's VERIFIED map): 0=ladder tracks(AIN0),
- * 1=ladder vol(AIN1), 2=battery(AIN4). (feldd's 4 fader channels are dropped
- * in the beacon firmware — no faders here.)
+ * 1=ladder vol(AIN1), 2..5=faders 1..4 (AIN3,6,2,7), 6=battery(AIN4).
  *
  * Adapted from the looper's ladder_read(): 2x oversample to quiet the rail.
  */
@@ -17,15 +18,24 @@
 #include <hal/nrf_gpio.h>
 #include "sp1_board.h"
 
-#define N_CH 3
+#define N_CH 7
 
 static const struct adc_dt_spec ch[N_CH] = {
 #define G(i) ADC_DT_SPEC_GET_BY_IDX(DT_PATH(zephyr_user), i)
-    G(0), G(1), G(2)
+    G(0), G(1), G(2), G(3), G(4), G(5), G(6)
 #undef G
 };
 
 static int16_t sample;
+
+void controls_rail(int on)
+{
+    if (on) {
+        nrf_gpio_pin_set(SP1_BTN_COM);
+    } else {
+        nrf_gpio_pin_clear(SP1_BTN_COM);
+    }
+}
 
 int controls_init(void)
 {
