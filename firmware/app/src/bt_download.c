@@ -386,9 +386,13 @@ static bool ds_write_and_verify(void)
 void bt_download_run(void)
 {
     /* Bring up the USB-CDC console (this build has no SWD/RTT) and give a host
-     * a couple of seconds to attach before the log starts. */
+     * a couple of seconds to attach before the log starts. Feed the WDT across
+     * the settle wait so no unfed span exceeds ~100 ms anywhere in the run. */
     usbdev_start();
-    k_msleep(2500);
+    for (int i = 0; i < 25; i++) {
+        feed_wdt();
+        k_msleep(100);
+    }
     rx_init();      /* interrupt-driven RX before any UART traffic */
 
 #ifdef CONFIG_SP1_BT_DOWNLOAD_ARM
