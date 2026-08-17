@@ -32,7 +32,44 @@ static const struct device *uart = DEVICE_DT_GET(DT_NODELABEL(uart0));
 
 static struct whci_parser parser;
 
-/* ---- low-level poll I/O ---- */
+/* ---- interrupt-driven RX ring (poll-mode UARTE drops bytes on the long
+ * READ_RAM responses; buffer in an ISR like module_link does). ---- */
+#define RX_RING 1024
+static uint8_t  ring[RX_RING];
+static volatile uint32_t ring_head, ring_tail, ring_overruns, rx_total;
+
+static void dl_uart_isr(const struct device *dev, void *user_data)
+{
+    uint8_t buf[64];
+    (void)user_data;
+    while (uart_irq_update(dev) && uart_irq_rx_ready(dev)) {
+        int n = uart_fifo_read(dev, buf, sizeof(buf));
+        for (int i = 0; i < n; i++) {
+            uint32_t head = ring_head;
+            if (head - ring_tail >= RX_RING) {
+                ring_overruns++;
+                continue;
+            }
+            ring[head % RX_RING] = buf[i];
+            ring_head = head + 1;
+            rx_total++;
+        }
+        if (n <= 0) {
+            break;
+        }
+    }
+}
+
+static void rx_init(void)
+{
+    ring_head = ring_tail = ring_overruns = rx_total = 0;
+    if (!device_is_ready(uart)) {
+        printk("DL: uart0 NOT READY\n");
+        return;
+    }
+    uart_irq_callback_user_data_set(uart, dl_uart_isr, NULL);
+    uart_irq_rx_enable(uart);
+}
 
 static void tx(const uint8_t *b, int n)
 {
@@ -41,34 +78,42 @@ static void tx(const uint8_t *b, int n)
     }
 }
 
-/* Drain RX through the codec, returning the next complete frame, or false on
+/* Pull the next complete frame from the ring through the codec, or false on
  * timeout (ms). */
 static bool rx_frame(struct whci_frame *out, int timeout_ms)
 {
     int64_t deadline = k_uptime_get() + timeout_ms;
-    uint8_t byte;
     while (k_uptime_get() < deadline) {
-        if (uart_poll_in(uart, &byte) == 0) {
+        while (ring_tail != ring_head) {
+            uint8_t byte = ring[ring_tail % RX_RING];
+            ring_tail++;
             if (whci_parse_byte(&parser, byte, out)) {
                 return true;
             }
-        } else {
-            k_busy_wait(200);
         }
+        k_busy_wait(100);
     }
     return false;
 }
 
 /* Send a command, wait for its command-complete ack; on success copy up to
- * cap bytes of ack data into data/*dlen. Returns true on a status-0 ack. */
+ * cap bytes of ack data into data/*dlen. Returns true on a status-0 ack.
+ * On failure, logs every frame it DID see (so a bad status / wrong opcode /
+ * short read is visible on the console). */
 static bool cmd_cc(const uint8_t *cmd, int clen, uint16_t opcode,
                    uint8_t *data, uint16_t cap, uint16_t *dlen, int timeout_ms)
 {
     struct whci_frame f;
+    uint32_t rx_before = rx_total;
+    int seen = 0;
+
     tx(cmd, clen);
     while (rx_frame(&f, timeout_ms)) {
+        seen++;
         if (f.kind != WHCI_PKT_HCI_EVT || f.event != 0x0E) {
-            continue;   /* not a command-complete; keep draining */
+            printk("DL:   rx non-CC frame kind=%02x evt=%02x len=%u\n",
+                   f.kind, f.event, f.len);
+            continue;
         }
         const uint8_t *d;
         uint16_t dl;
@@ -82,7 +127,14 @@ static bool cmd_cc(const uint8_t *cmd, int clen, uint16_t opcode,
             }
             return true;
         }
+        /* A command-complete, but not the one we wanted (wrong opcode or
+         * nonzero status): show it — this is the key diagnostic. */
+        printk("DL:   rx CC op=%02x%02x status=%02x (wanted op=%04x) len=%u\n",
+               f.payload[2], f.payload[1], f.len >= 4 ? f.payload[3] : 0xFF,
+               opcode, f.len);
     }
+    printk("DL:   (no matching ack: %d frame(s) seen, %u rx bytes, %u overruns)\n",
+           seen, rx_total - rx_before, ring_overruns);
     return false;
 }
 
@@ -102,6 +154,7 @@ static bool enter_download(void)
     nrf_gpio_pin_set(MODULE_RSTN);      /* release reset with CTS still LOW */
     k_msleep(10);
 
+    ring_tail = ring_head;              /* flush any pre-download boot chatter */
     whci_parser_init(&parser);
     /* The ROM re-autobauds on entry: the first one or two HCI_RESETs get
      * dropped. Loop until the ack lands (doc §3/§5). */
@@ -280,6 +333,7 @@ void bt_download_run(void)
      * a couple of seconds to attach before the log starts. */
     usbdev_start();
     k_msleep(2500);
+    rx_init();      /* interrupt-driven RX before any UART traffic */
 
 #ifdef CONFIG_SP1_BT_DOWNLOAD_ARM
     printk("\n=== sp1-beacon MODULE FLASHER — ARMED (will WRITE the DS) ===\n");
