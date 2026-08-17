@@ -279,6 +279,15 @@ static bool load_minidriver(void)
         return false;
     }
     uint32_t total = sizeof(cybt_minidriver);
+    /* Defense in depth: the minidriver loads into RAM, never flash. Refuse if a
+     * corrupt blob address ever pointed this WRITE_RAM at the flash window — the
+     * DS floor guards the DS write, and this guards the only other WRITE_RAM. */
+    if (CYBT_BLOB_MINIDRIVER_ADDR >= CYBT_FLASH_BASE ||
+        (uint64_t)CYBT_BLOB_MINIDRIVER_ADDR + total > CYBT_FLASH_BASE) {
+        printk("DL: ABORT — minidriver addr 0x%08X is in flash space, not RAM\n",
+               (unsigned)CYBT_BLOB_MINIDRIVER_ADDR);
+        return false;
+    }
     for (uint32_t off = 0; off < total; off += CYBT_WRITE_CHUNK) {
         uint8_t chunk = (total - off) < CYBT_WRITE_CHUNK ? (uint8_t)(total - off) : CYBT_WRITE_CHUNK;
         uint8_t wcmd[8 + CYBT_WRITE_CHUNK];

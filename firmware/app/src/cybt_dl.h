@@ -44,6 +44,15 @@
 #define CYBT_DS_BASE      0xFF003000u   /* SP-1; verified against the live SS before any write */
 #define CYBT_DS_FLOOR     CYBT_DS_BASE  /* writes strictly at/above this, never toward VS/SS */
 
+/* Structural invariant: the DS floor MUST sit strictly above the VS (and thus
+ * far above the SS at flash base). If a future edit ever drops the floor into
+ * the VS/SS range, the build FAILS here rather than shipping a flasher that
+ * could reach the un-restorable Static Section. This is the load-bearing
+ * safety property, enforced at compile time. */
+#if (CYBT_DS_FLOOR <= CYBT_VS_END) || (CYBT_DS_FLOOR < CYBT_FLASH_BASE) || (CYBT_DS_FLOOR >= CYBT_FLASH_END)
+#error "CYBT_DS_FLOOR must be strictly above VS end and inside the flash window"
+#endif
+
 /* RAM staging address for the minidriver (doc §7; the hex's start-linear-
  * address record should match — gen_blobs.py asserts it). */
 #define CYBT_MINIDRIVER_RAM 0x00220000u
