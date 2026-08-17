@@ -106,21 +106,6 @@ static void power_off(void)
     for (;;) { }
 }
 
-/* ---- FAILSAFE recovery (Track1+4 held): reset into the TE bootloader so the
- * device can ALWAYS be reflashed. Verbatim from feldd/looper. ---- */
-
-static void enter_dfu(void)
-{
-    led_pin(SP1_TRACK_LED1, true);
-    led_pin(SP1_TRACK_LED2, true);
-    led_pin(SP1_TRACK_LED3, true);
-    led_pin(SP1_TRACK_LED4, true);
-    NRF_POWER->GPREGRET = 0x57u;
-    __DSB();
-    NVIC_SystemReset();
-    for (;;) { }
-}
-
 /* ---- battery gauge (calibration from feldd) ---- */
 
 #define BATT_RAW_EMPTY 1962
@@ -413,9 +398,13 @@ int main(void)
         }
 
         /* ---- housekeeping ---- */
+        /* Track 1+4 held: POWER OFF (not an explicit DFU jump). Powering off is
+         * the native primitive — from off, holding Track 1+4 while the
+         * bootloader boots (press •• or plug USB) enters DFU the way TE/
+         * solderless do it. Every build powers off the same two ways. */
         if (buttons_dfu_held()) {
-            printk("DFU combo: rebooting into the bootloader\n");
-            enter_dfu();
+            printk("Track 1+4 held: powering off (hold 1+4 + USB at boot for DFU)\n");
+            power_off();
         }
 
         /* •• long-hold = power off; short tap logs status (+ pings when up). */

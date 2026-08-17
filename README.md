@@ -39,9 +39,10 @@ module still runs feldd's BLE-MIDI app, which ignores `SET_STATE` — so today a
 wake broadcasts feldd's presence advertisement instead (same state machine,
 same timing, same power behavior; `./scripts/fw.sh e2e` sees it on the air).
 
-Extras that survive from the bring-up builds: `•• hold ~5 s` = power off (••
-wakes), a short `••` tap logs full state to the console, `Track 1+4` held ~3 s
-= DFU escape into the TE bootloader, and the USB console only comes up when a
+Extras that survive from the bring-up builds: `•• hold ~5 s` = power off, a
+short `••` tap logs full state to the console, `Track 1+4` held ~1.2 s = power
+off too (from off, hold 1+4 while it boots to enter DFU the native way), and
+the USB console only comes up when a
 cable is present (idle power).
 
 Next: **M3b** the CYW20706 beacon app (ModusToolbox), **M4** the SS-preserving

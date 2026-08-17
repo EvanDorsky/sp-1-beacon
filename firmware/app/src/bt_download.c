@@ -388,6 +388,35 @@ static bool ds_write_and_verify(void)
 }
 #endif /* CONFIG_SP1_BT_DOWNLOAD_ARM */
 
+/* Power the device OFF (SYSTEM_OFF), mirroring the normal build's power_off so
+ * every build powers off the same way. From off, holding Track 1+4 while the
+ * bootloader boots (press •• or plug USB) enters DFU the native TE/solderless
+ * way — the app never jumps to DFU itself. */
+static void dl_power_off(void)
+{
+    nrf_gpio_pin_clear(MODULE_RSTN);        /* hold the module in reset (BT off) */
+    nrf_gpio_cfg_output(MODULE_RSTN);
+    nrf_gpio_pin_clear(MODULE_RSTN);
+    for (int i = 0; i < LED_COUNT; i++) {
+        led_idx(i, false);                  /* LEDs dark = the "off" cue */
+    }
+    controls_rail(0);                       /* stop powering the ladders */
+
+    /* If •• triggered this it is still held; arming sense-low now would re-wake
+     * instantly, so wait for release first (Track1+4 trigger: •• is high, this
+     * falls straight through), feeding the WDT meanwhile. */
+    while (nrf_gpio_pin_read(SP1_FUNC_BTN) == 0) { feed_wdt(); k_msleep(20); }
+    k_msleep(60);
+
+    nrf_gpio_cfg_sense_input(SP1_FUNC_BTN, NRF_GPIO_PIN_PULLUP,
+                             NRF_GPIO_PIN_SENSE_LOW);
+    NRF_POWER->RESETREAS = 0xFFFFFFFFu;
+    __DSB();
+    NRF_POWER->SYSTEMOFF = 1u;
+    __DSB();
+    for (;;) { }
+}
+
 void bt_download_run(void)
 {
     /* Bring up the USB-CDC console (this build has no SWD/RTT) and give a host
@@ -451,32 +480,23 @@ void bt_download_run(void)
 #endif
 
 halt:
-    printk("DL: halted. Hold Track 1+4 (~1 s) for DFU, or power-cycle.\n");
+    printk("DL: halted. Hold •• (5 s) or Track 1+4 to power off "
+           "(hold 1+4 + plug USB at boot for DFU).\n");
     /* ESCAPE HATCH: the flasher runs no control loop, so without this a halted
-     * flasher has no way back to the bootloader (no •• power-off, no button
-     * scan) — you'd have to drain the battery. Poll the TRACKS ladder for the
-     * Track1+4 DFU combo and reset into the bootloader on a ~1 s hold, the same
-     * gesture the normal build uses. controls_init() powers the ladder rail +
-     * SAADC (its pins don't overlap the module UART). */
+     * flasher would have no way to power off — you'd drain the battery. Poll ••
+     * (direct GPIO) and the Track 1+4 combo (TRACKS ladder) and power off on a
+     * hold, exactly like the normal build. controls_init() powers the ladder
+     * rail + SAADC (its pins don't overlap the module UART). */
     controls_init();
-    int dfu_cnt = 0;
+    nrf_gpio_cfg_input(SP1_FUNC_BTN, NRF_GPIO_PIN_PULLUP);
+    int func_cnt = 0, trk_cnt = 0;
     for (;;) {
         feed_wdt();
-        if (buttons_in_dfu_band_pure(controls_read_raw(0))) {
-            if (++dfu_cnt >= 10) {         /* ~1 s at 100 ms/poll */
-                /* Light the track row as confirmation (no other LED feedback
-                 * in this build), then reset into the TE bootloader. */
-                led_pin(SP1_TRACK_LED1, true);
-                led_pin(SP1_TRACK_LED2, true);
-                led_pin(SP1_TRACK_LED3, true);
-                led_pin(SP1_TRACK_LED4, true);
-                NRF_POWER->GPREGRET = 0x57u;
-                __DSB();
-                NVIC_SystemReset();
-            }
-        } else {
-            dfu_cnt = 0;
-        }
+        int func_held = (nrf_gpio_pin_read(SP1_FUNC_BTN) == 0);
+        int trk_held  = buttons_in_dfu_band_pure(controls_read_raw(0));
+        led_pin(SP1_TRACK_LED1, func_held || trk_held);   /* held-gesture feedback */
+        if (func_held) { if (++func_cnt >= 50) dl_power_off(); } else { func_cnt = 0; }  /* ~5 s */
+        if (trk_held)  { if (++trk_cnt  >= 12) dl_power_off(); } else { trk_cnt  = 0; }  /* ~1.2 s */
         k_msleep(100);
     }
 }
