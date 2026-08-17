@@ -16,6 +16,7 @@
 #include "cybt_dl.h"
 #include "wiced_hci.h"
 #include "usbdev.h"
+#include "wdt.h"
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
 #include <zephyr/devicetree.h>
@@ -84,6 +85,8 @@ static bool rx_frame(struct whci_frame *out, int timeout_ms)
 {
     int64_t deadline = k_uptime_get() + timeout_ms;
     while (k_uptime_get() < deadline) {
+        feed_wdt();   /* the download sequence spans many seconds; keep the
+                       * ~8 s watchdog fed (main starts it, never feeds it here) */
         while (ring_tail != ring_head) {
             uint8_t byte = ring[ring_tail % RX_RING];
             ring_tail++;
@@ -198,6 +201,7 @@ static void diag_raw_read(uint32_t addr, uint8_t len)
     tx(cmd, n);
     deadline = k_uptime_get() + 800;
     while (k_uptime_get() < deadline) {
+        feed_wdt();
         while (ring_tail != ring_head) {
             uint8_t b = ring[ring_tail % RX_RING];
             ring_tail++;
