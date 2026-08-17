@@ -60,8 +60,15 @@ Zephyr / nRF Connect SDK app for the nRF52840, board definition `sp1` from
 ./scripts/fw.sh test           # host unit tests (buttons decode, WICED-HCI codec)
 ```
 
-Flash with the community [Solderless](https://solderless.engineering) tool:
-power off, hold Track 1+4, plug USB, upload the `.bin`.
+Flashing (either way — put the SP-1 in bootloader mode first: power off, hold
+Track 1+4, plug USB):
+
+- **CLI:** `./scripts/fw.sh flash` — uses [rome](https://github.com/softmodded/rome),
+  a Rust CLI that drives the TE bootloader's serial (the same protocol
+  solderless uses). Build it once: `brew install libusb && (cd ~/src/rome &&
+  cargo build --release)`; override the binary path with `ROME=...` or the port
+  with `./scripts/fw.sh flash /dev/cu.usbmodemXXX`.
+- **Browser:** upload the `.bin` at [Solderless](https://solderless.engineering).
 
 ## ⚠️ Flashing safety
 

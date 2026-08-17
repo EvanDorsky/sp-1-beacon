@@ -8,6 +8,7 @@
 #   ./scripts/fw.sh test       run the host unit tests
 #   ./scripts/fw.sh monitor    open the SP-1 CDC serial console
 #   ./scripts/fw.sh e2e        press->ping E2E monitor (scripts/e2e_monitor.py)
+#   ./scripts/fw.sh flash      flash sp1_beacon.bin over the bootloader (rome, CLI)
 #   ./scripts/fw.sh clean      remove the build dir
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -72,6 +73,19 @@ case "${1:-}" in
            else python3 "$ROOT/scripts/e2e_monitor.py" "$@"; fi ;;
   dl)      do_dlbuild "download.conf"     && do_bin ;;   # module flasher, DRY-RUN
   dlarm)   do_dlbuild "download-arm.conf" && do_bin ;;   # module flasher, ARMED write
+  flash)   shift
+           # CLI flash over the TE bootloader's serial via rome
+           # (github.com/softmodded/rome), the same protocol solderless uses.
+           # Put the SP-1 in bootloader mode first: power off, hold Track 1+4,
+           # plug USB (or hold Track 1+4 ~1.2 s in-app to DFU-reset into it).
+           ROME="${ROME:-$HOME/src/rome/target/release/rome}"
+           command -v "$ROME" >/dev/null 2>&1 || [ -x "$ROME" ] || ROME="$(command -v rome)"
+           [ -x "$ROME" ] || { echo "rome not found. Build it: (cd ~/src/rome && cargo build --release), or set ROME=/path/to/rome"; exit 1; }
+           [ -f "$BIN_OUT" ] || { echo "no $BIN_OUT — run ./scripts/fw.sh bin first"; exit 1; }
+           port="${1:-$(ls /dev/cu.usbmodem* 2>/dev/null | head -1)}"
+           [ -n "$port" ] || { echo "no /dev/cu.usbmodem* — is the SP-1 in bootloader mode (Track 1+4 + USB)?"; echo "list ports with: $ROME flash -l"; exit 1; }
+           echo "flashing $BIN_OUT via rome on $port"
+           "$ROME" flash -p "$port" "$BIN_OUT" ;;
   clean)   rm -rf "$BUILD" && echo "cleaned $BUILD" ;;
-  *) sed -n '2,12p' "$0" ;;
+  *) sed -n '2,13p' "$0" ;;
 esac
