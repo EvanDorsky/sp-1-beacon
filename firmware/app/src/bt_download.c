@@ -172,8 +172,46 @@ static bool enter_download(void)
 
 #define SS_LEN 64
 
+/* Flush any buffered RX + reset the frame parser to a clean slate. Call before
+ * each request/response exchange so stale bytes can't mis-frame the reply. */
+static void rx_flush(void)
+{
+    ring_tail = ring_head;
+    whci_parser_init(&parser);
+}
+
+/* Diagnostic: send one READ_RAM and dump the RAW response bytes (read-only,
+ * no framing assumptions) so we can see exactly what the ROM returns. */
+static void diag_raw_read(uint32_t addr, uint8_t len)
+{
+    uint8_t cmd[8];
+    int n = cybt_cmd_read_ram(cmd, sizeof(cmd), addr, len);
+    int64_t deadline;
+    int count = 0;
+
+    rx_flush();
+    printk("DL: [diag] READ_RAM 0x%08X len %u -> tx:", addr, len);
+    for (int i = 0; i < n; i++) {
+        printk(" %02x", cmd[i]);
+    }
+    printk("\nDL: [diag] raw rx:");
+    tx(cmd, n);
+    deadline = k_uptime_get() + 800;
+    while (k_uptime_get() < deadline) {
+        while (ring_tail != ring_head) {
+            uint8_t b = ring[ring_tail % RX_RING];
+            ring_tail++;
+            printk(" %02x", b);
+            count++;
+        }
+        k_busy_wait(100);
+    }
+    printk("\nDL: [diag] %d raw bytes, %u overruns\n", count, ring_overruns);
+}
+
 static bool read_ss(uint8_t *out /* SS_LEN */)
 {
+    rx_flush();   /* clean slate: no stale bytes from the entry handshake */
     /* Read the SS in READ_CHUNK slices at ROM level. */
     for (uint32_t off = 0; off < SS_LEN; off += CYBT_READ_CHUNK) {
         uint8_t chunk = (SS_LEN - off) < CYBT_READ_CHUNK ? (uint8_t)(SS_LEN - off) : CYBT_READ_CHUNK;
@@ -195,6 +233,11 @@ static bool identity_gate(void)
 {
     uint8_t ss1[SS_LEN], ss2[SS_LEN];
     uint32_t base;
+
+    /* Diagnostic first: dump the raw wire bytes for a small SS read + a RAM
+     * read (a known-good control address) so we can see what the ROM returns. */
+    diag_raw_read(CYBT_FLASH_BASE, 16);   /* SS @ 0xFF000000 */
+    diag_raw_read(0x00200000u, 16);       /* on-chip RAM base — control read */
 
     /* Flash reads are deterministic; require two byte-identical reads so a
      * flaky read can't spoof the gate (findings.md). */
