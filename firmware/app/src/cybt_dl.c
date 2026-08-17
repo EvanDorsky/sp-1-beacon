@@ -128,8 +128,17 @@ bool cybt_ss_ds_base(const uint8_t *ss, uint32_t ss_len, uint32_t *out_base)
                 return false;       /* type-0x02 must carry a 4-byte DS base */
             }
             const uint8_t *p = ss + off + 3u;
-            *out_base = (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
-                        ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+            uint32_t v = (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+                         ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+            /* The record stores a flash OFFSET (0..flash size, e.g. 0x3000 on
+             * the SP-1), captured on hardware. Normalize to the memory-mapped
+             * address the write path uses (0xFF000000 + offset). A value that
+             * is already mapped (top byte 0xFF) passes through unchanged, so
+             * either encoding yields the mapped DS base. */
+            if (v < CYBT_FLASH_BASE) {
+                v += CYBT_FLASH_BASE;
+            }
+            *out_base = v;
             return true;
         }
         off += 3u + rlen;

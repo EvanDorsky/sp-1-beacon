@@ -132,19 +132,26 @@ static uint32_t build_ss(uint8_t *ss, uint32_t ds_base, int include_type2)
 static void test_ss_ds_base(void)
 {
     uint8_t ss[64];
-    uint32_t len = build_ss(ss, CYBT_DS_BASE, 1);
     uint32_t base = 0;
-    CHECK(cybt_ss_ds_base(ss, len, &base));
-    CHECK(base == CYBT_DS_BASE);
 
-    /* eval-board layout (0xFF004000) parses fine but must NOT pass the gate
-     * for an SP-1 build. */
-    len = build_ss(ss, 0xFF004000u, 1);
+    /* Hardware encoding: the SS stores a flash OFFSET (0x3000 on the SP-1);
+     * the parser normalizes it to the mapped address 0xFF003000. */
+    uint32_t len = build_ss(ss, 0x00003000u, 1);
+    CHECK(cybt_ss_ds_base(ss, len, &base));
+    CHECK(base == 0xFF003000u);
+
+    /* Already-mapped encoding passes through unchanged (idempotent). */
+    len = build_ss(ss, 0xFF003000u, 1);
+    CHECK(cybt_ss_ds_base(ss, len, &base) && base == 0xFF003000u);
+
+    /* eval-board layout (offset 0x4000 -> 0xFF004000) parses fine but must NOT
+     * pass the gate for an SP-1 build. */
+    len = build_ss(ss, 0x00004000u, 1);
     CHECK(cybt_ss_ds_base(ss, len, &base) && base == 0xFF004000u);
     CHECK(!cybt_ss_gate_ok(ss, len));
 
     /* No type-0x02 record: refuse. */
-    len = build_ss(ss, CYBT_DS_BASE, 0);
+    len = build_ss(ss, 0x00003000u, 0);
     CHECK(!cybt_ss_ds_base(ss, len, &base));
     CHECK(!cybt_ss_gate_ok(ss, len));
 }
@@ -152,8 +159,8 @@ static void test_ss_ds_base(void)
 static void test_ss_gate(void)
 {
     uint8_t ss[64];
-    uint32_t len = build_ss(ss, CYBT_DS_BASE, 1);
-    CHECK(cybt_ss_gate_ok(ss, len));           /* matching base: OK */
+    uint32_t len = build_ss(ss, 0x00003000u, 1);   /* SP-1 offset -> 0xFF003000 */
+    CHECK(cybt_ss_gate_ok(ss, len));               /* matching base: OK */
 
     /* Malformed streams degrade to a safe refuse, never a crash/redirect. */
     uint8_t junk[64];
