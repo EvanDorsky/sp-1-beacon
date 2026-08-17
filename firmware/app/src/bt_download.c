@@ -142,7 +142,7 @@ static bool cmd_cc(const uint8_t *cmd, int clen, uint16_t opcode,
 
 static bool enter_download(void)
 {
-    uint8_t cmd[8];
+    uint8_t cmd[16];
     int n = cybt_cmd_hci_reset(cmd, sizeof(cmd));
 
     /* Strap: module CTS LOW across the reset release selects download mode. */
@@ -184,7 +184,7 @@ static void rx_flush(void)
  * no framing assumptions) so we can see exactly what the ROM returns. */
 static void diag_raw_read(uint32_t addr, uint8_t len)
 {
-    uint8_t cmd[8];
+    uint8_t cmd[16];
     int n = cybt_cmd_read_ram(cmd, sizeof(cmd), addr, len);
     int64_t deadline;
     int count = 0;
@@ -215,7 +215,7 @@ static bool read_ss(uint8_t *out /* SS_LEN */)
     /* Read the SS in READ_CHUNK slices at ROM level. */
     for (uint32_t off = 0; off < SS_LEN; off += CYBT_READ_CHUNK) {
         uint8_t chunk = (SS_LEN - off) < CYBT_READ_CHUNK ? (uint8_t)(SS_LEN - off) : CYBT_READ_CHUNK;
-        uint8_t cmd[8];
+        uint8_t cmd[16];
         uint8_t data[CYBT_READ_CHUNK];
         uint16_t dlen = 0;
         int n = cybt_cmd_read_ram(cmd, sizeof(cmd), CYBT_FLASH_BASE + off, chunk);
@@ -272,7 +272,7 @@ static bool identity_gate(void)
 
 static bool load_minidriver(void)
 {
-    uint8_t cmd[8];
+    uint8_t cmd[16];
     int n = cybt_cmd_download_minidriver(cmd, sizeof(cmd));
     if (!cmd_cc(cmd, n, CYBT_OP_DL_MINIDRIVER, NULL, 0, NULL, 500)) {
         printk("DL: DOWNLOAD_MINIDRIVER announce not acked\n");
@@ -351,7 +351,7 @@ static bool ds_write_and_verify(void)
     /* Read-back verify: byte-for-byte compare (findings.md's proof method). */
     for (uint32_t off = 0; off < total; off += CYBT_READ_CHUNK) {
         uint8_t chunk = (total - off) < CYBT_READ_CHUNK ? (uint8_t)(total - off) : CYBT_READ_CHUNK;
-        uint8_t cmd[8], rd[CYBT_READ_CHUNK];
+        uint8_t cmd[16], rd[CYBT_READ_CHUNK];
         uint16_t dlen = 0;
         int n = cybt_cmd_read_ram(cmd, sizeof(cmd), base + off, chunk);
         if (!cmd_cc(cmd, n, CYBT_OP_READ_RAM, rd, sizeof(rd), &dlen, 1000) || dlen != chunk) {
@@ -418,7 +418,7 @@ void bt_download_run(void)
     }
     /* Warm-boot into the freshly written app. */
     {
-        uint8_t cmd[8];
+        uint8_t cmd[16];
         int n = cybt_cmd_launch_ram(cmd, sizeof(cmd), CYBT_LAUNCH_REBOOT);
         tx(cmd, n);
     }
