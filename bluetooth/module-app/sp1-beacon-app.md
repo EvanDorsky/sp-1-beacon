@@ -81,6 +81,41 @@ filter on the address. AD structure:
    proven example), trace routing, and the LED helpers (never triggered —
    no button, no bonding).
 
+## Flash safety: the app contains zero flash-write instructions
+
+The one unrecoverable act on this module is damaging the Static Section of
+its serial flash (`README.md`). This app is made **structurally incapable of
+writing the flash at all**, not merely unlikely to:
+
+- All five of the example's `wiced_hal_write_nvram` call sites are removed
+  (host-info save, GATT-write save, paired-keys save, local-identity-keys
+  save, and the btstack_v1 GATT handler's save). Four were unreachable anyway
+  (they need a connection or a bond, and a non-connectable broadcaster has
+  neither); the fifth — `BTM_LOCAL_IDENTITY_KEYS_UPDATE_EVT` — **does fire at
+  boot** (the stack generates identity keys unprompted), so it was live code:
+  now the keys are simply regenerated each boot, which a broadcaster never
+  notices. NVRAM *reads* remain (reads are harmless).
+- **Audit gate** (same idea as feldd's ELF-grep gate): after every build,
+  `arm-none-eabi-nm` over all app object files must show **no references** to
+  `write_nvram` / `delete_nvram` / `sflash_write` / `sflash_erase` /
+  `eflash`. Verified on the current build.
+- The app cannot enter download mode by itself: there is no app-side API —
+  download mode is a hardware strap (CTS low at reset release), owned by the
+  nRF (`findings.md`).
+- A crashed or misbehaving *app* is always recoverable via Recovery-Reset
+  into the mask-ROM download mode; only the flasher (M4), never this app,
+  decides what gets written.
+
+## Address check (the feldd docs' "fixed-address override")
+
+Verified on the built image: the app source never calls
+`wiced_bt_set_local_bdaddr` (the symbol exists only in the ROM map), the
+generated `.cgs` carries no BD_ADDR record, and the makefile's
+`BT_DEVICE_ADDRESS?=default` only feeds Infineon's own ChipLoad programming
+step, which our flow does not use. With privacy/RPA disabled, the app
+advertises with the module's factory Static-Section BD_ADDR — the stable
+address receivers filter on.
+
 ## Flash-map note for the reflash (M4)
 
 The stock build targets the eval board's `.btp`: `ConfigDSLocation = 0x4000`.
