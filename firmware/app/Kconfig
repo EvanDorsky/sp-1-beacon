@@ -6,4 +6,30 @@
 
 source "samples/subsys/usb/common/Kconfig.sample_usbd"
 
+config SP1_BT_DOWNLOAD
+	bool "DEV-ONLY: CYW20706 module flasher (reflash the radio's DS)"
+	default n
+	help
+	  Build the module flasher (bt_download.c) INSTEAD of the normal beacon
+	  control loop. It enters the module's download ROM, runs the SS identity
+	  gate, loads the minidriver, and performs the SS-preserving DS-only
+	  Upgrade Download of the beacon module app (embedded via the generated,
+	  git-ignored src/cybt_blobs.h — run scripts/gen_blobs.py first). It never
+	  returns. NON-DESTRUCTIVE (identity gate + DS dry-run only) unless
+	  SP1_BT_DOWNLOAD_ARM is also set. There is NO chip-erase path anywhere in
+	  this subsystem. Console is USB-CDC. See bluetooth/reflashing-the-module.md.
+
+config SP1_BT_DOWNLOAD_ARM
+	bool "Arm the DESTRUCTIVE DS write in the module flasher"
+	depends on SP1_BT_DOWNLOAD
+	default n
+	help
+	  When unset (default), the flasher runs every non-destructive step —
+	  download-mode entry, the SS identity gate, minidriver launch, and a DS
+	  dry-run — then STOPS before writing. Set this ONLY to perform the real
+	  DS write. The DS-only / floor-check / identity-gate / SS-survives-check
+	  guards remain active either way; this switch only enables the write. The
+	  write is still DS-only and SS-preserving (never chip-erase). This is the
+	  explicit human arm for the first destructive touch of the module flash.
+
 source "Kconfig.zephyr"

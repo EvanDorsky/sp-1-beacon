@@ -13,6 +13,12 @@ __pycache__/
 # OS
 .DS_Store
 
+# Vendor-derived, DO NOT COMMIT: the generated CYW20706 blobs (Infineon
+# minidriver + Cypress-derived DS image) embedded by the M4 flasher build.
+firmware/app/src/cybt_blobs.h
+# And any radio hex inputs, if copied into the tree.
+*.hcd
+
 # feldd-cc: the user's runtime config is personal (the example is tracked)
 feldd-cc/feldd_cc.config.json
 

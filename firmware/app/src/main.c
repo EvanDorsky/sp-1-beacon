@@ -38,6 +38,9 @@
 #include "wiced_hci.h"
 #include "beacon_state.h"
 #include "wdt.h"
+#ifdef CONFIG_SP1_BT_DOWNLOAD
+#include "bt_download.h"
+#endif
 
 /* ---- watchdog (verbatim from feldd: ~8 s hang backstop, fed per tick) ---- */
 
@@ -309,6 +312,14 @@ int main(void)
     nrf_gpio_pin_clear(NRF_GPIO_PIN_MAP(0, 10));
 
     charger_init();
+
+#ifdef CONFIG_SP1_BT_DOWNLOAD
+    /* DEV-ONLY module flasher: runs here — before the charge-standby gate — so
+     * a plain reset drives it with no •• wake needed on a USB-powered unit.
+     * The WDT is already started and USB comes up inside bt_download_run; it
+     * never returns, so the gate + control loop below are skipped. */
+    bt_download_run();
+#endif
 
     charge_standby_gate(wake_reas);
 

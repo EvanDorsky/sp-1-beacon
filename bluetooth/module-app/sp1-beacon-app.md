@@ -116,6 +116,51 @@ step, which our flow does not use. With privacy/RPA disabled, the app
 advertises with the module's factory Static-Section BD_ADDR — the stable
 address receivers filter on.
 
+## The flasher (M4) — status and how to run it
+
+The nRF-side flasher is written and **build-verified**, host-tested where it
+counts, but **not hardware-validated**. Layout:
+
+- `firmware/app/src/cybt_dl.{c,h}` — the pure protocol/planning core: command
+  builders, ack matching, SS TLV → DS-base parsing, and the DS-window floor
+  guard. Host-tested in `firmware/test/test_cybt_dl.c` (byte-exact against the
+  opcodes; the floor/identity guards hammered).
+- `firmware/app/src/bt_download.c` — the dev-only I/O shell (poll-mode uart0,
+  the download strap, sequencing). Compiled only under `CONFIG_SP1_BT_DOWNLOAD`.
+- `scripts/gen_blobs.py` — Intel-HEX → `firmware/app/src/cybt_blobs.h`
+  (gitignored): the minidriver + the DS image, SS record dropped.
+
+Build/run (needs `cybt_blobs.h` generated first):
+
+```
+scripts/gen_blobs.py --minidriver <uart.hex> --ds <..._download.hex> --ds-base 0x...
+./scripts/fw.sh dl       # DRY-RUN: enter download mode, identity gate, DS plan — NO write
+./scripts/fw.sh dlarm    # ARMED: performs the DS-only write + read-back verify
+```
+
+Safety properties, verified this build:
+- **No chip-erase exists** in the subsystem (`cybt_dl.h` `#error`s if
+  `CYBT_DL_ALLOW_CHIP_ERASE` is defined; no 0xFFCE builder).
+- **Floor guard**: every DS chunk is checked against `CYBT_DS_FLOOR` before it
+  is emitted; a write toward VS/SS is refused (host-tested).
+- **Identity gate before the minidriver**: the SS is read twice (must be
+  byte-identical) and its DS base must equal the compile-time `CYBT_DS_BASE`,
+  or the run aborts before any write machinery loads.
+- The dry-run and a wrong-base blob both abort cleanly — demonstrated: with a
+  blob built for the eval base while `CYBT_DS_BASE` was the SP-1's, `ds_plan()`
+  refuses and the compiler proved the entire write path dead (the DS blob was
+  even dropped from the image).
+
+**Bench-open questions (resolve on hardware before/while running):**
+1. **Minidriver identity + launch address.** This BSP's `uart.hex` loads at
+   `0x000D0200` (launch `0x000D0201`, Thumb), NOT the older doc's `0x00220000`.
+   `gen_blobs.py` derives the address from the hex and reports it; confirm this
+   is the real download minidriver (vs. the Programming-Tools `minidriver.hex`)
+   before an armed run.
+2. **uart0 flow control.** `download.overlay` disables `hw-flow-control` for
+   poll TX; if entry stalls, that's the first suspect.
+3. **DS base = the flash-map trap below.**
+
 ## Flash-map note for the reflash (M4)
 
 The stock build targets the eval board's `.btp`: `ConfigDSLocation = 0x4000`.

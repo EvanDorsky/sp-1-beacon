@@ -1,0 +1,12 @@
+/*
+ * download.overlay — DEV-ONLY DT overlay for the module flasher build.
+ *
+ * The flasher drives uart0 in POLL mode and owns the module's CTS line (P1.01)
+ * as a plain GPIO for the download strap, so the UARTE must NOT do hardware
+ * flow control (its CTS gating would stall poll TX). Disable it here; the
+ * normal runtime build keeps hw-flow-control in app.overlay. (findings.md:
+ * the burner-proven download flow uses flow_ctrl = none.)
+ */
+&uart0 {
+    /delete-property/ hw-flow-control;
+};

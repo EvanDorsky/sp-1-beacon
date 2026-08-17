@@ -25,6 +25,17 @@ OBJDUMP="$SDK/arm-zephyr-eabi/bin/arm-zephyr-eabi-objdump"
 do_build(){ local p="$1"; cd "$WS" || exit 1
   ZEPHYR_SDK_INSTALL_DIR="$SDK" west build -b sp1 -d build "$APP" $p -- -DBOARD_ROOT="$BOARD_ROOT"; }
 
+# DEV-ONLY module flasher build. $1 = the EXTRA_CONF_FILE (download.conf =
+# dry-run, download-arm.conf = armed write).
+do_dlbuild(){ local conf="$1"; cd "$WS" || exit 1
+  [ -f "$APP/src/cybt_blobs.h" ] || {
+    echo "missing $APP/src/cybt_blobs.h — generate it first:"; echo
+    echo "  scripts/gen_blobs.py --minidriver <uart.hex> --ds <..._download.hex>"; exit 1; }
+  ZEPHYR_SDK_INSTALL_DIR="$SDK" west build -b sp1 -d build "$APP" -p -- \
+    -DBOARD_ROOT="$BOARD_ROOT" \
+    -DEXTRA_CONF_FILE="$conf" \
+    -DEXTRA_DTC_OVERLAY_FILE="download.overlay"; }
+
 do_bin(){
   [ -f "$ELF" ] || { echo "no ELF - run a build first"; exit 1; }
   # The TE bootloader runs the app at 0x20000, so the vector table must link
@@ -59,6 +70,8 @@ case "${1:-}" in
   e2e)     shift
            if command -v uv >/dev/null 2>&1; then uv run "$ROOT/scripts/e2e_monitor.py" "$@"
            else python3 "$ROOT/scripts/e2e_monitor.py" "$@"; fi ;;
+  dl)      do_dlbuild "download.conf"     && do_bin ;;   # module flasher, DRY-RUN
+  dlarm)   do_dlbuild "download-arm.conf" && do_bin ;;   # module flasher, ARMED write
   clean)   rm -rf "$BUILD" && echo "cleaned $BUILD" ;;
   *) sed -n '2,12p' "$0" ;;
 esac

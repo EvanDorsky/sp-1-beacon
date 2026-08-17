@@ -20,4 +20,9 @@ target_sources(app PRIVATE
     src/usbdev.c
     src/wiced_hci.c
     src/module_link.c
-    src/beacon_state.c)
+    src/beacon_state.c
+    src/cybt_dl.c)          # pure download-protocol core (host-tested); safe to always build
+# DEV-ONLY module flasher (CONFIG_SP1_BT_DOWNLOAD). bt_download.c #includes the
+# generated, git-ignored src/cybt_blobs.h (scripts/gen_blobs.py), so it is
+# compiled in ONLY for the flasher build — the normal image never needs it.
+target_sources_ifdef(CONFIG_SP1_BT_DOWNLOAD app PRIVATE src/bt_download.c)
