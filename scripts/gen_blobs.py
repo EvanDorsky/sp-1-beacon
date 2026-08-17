@@ -98,11 +98,14 @@ def main():
         md_start = base
         print(f"note: minidriver has no start-linear-address record; "
               f"launching at lowest segment 0x{md_start:08X}")
-    if md_start != MINIDRIVER_RAM:
-        print(f"NOTE: minidriver load/launch addr 0x{md_start:08X} differs from the "
-              f"older doc's 0x{MINIDRIVER_RAM:08X}. This is toolchain/part specific — "
-              f"the firmware uses the address emitted here. Confirm against your "
-              f"ChipLoad/Programming-Tools minidriver before a hardware run.")
+    # The current CYBT_353027_EVAL minidriver.hex (Programming Tools; identical
+    # to the BSP's uart.hex) loads at 0x0D0200 — the doc's 0x00220000 is from an
+    # older SDK. §7 is explicit that the address comes from the type-05 record,
+    # which is what we use, so 0x0D0200 here is CORRECT, not a warning.
+    if md_start not in (MINIDRIVER_RAM, 0x000D0201, 0x000D0200):
+        print(f"NOTE: minidriver load/launch addr 0x{md_start:08X} is neither the "
+              f"doc's 0x{MINIDRIVER_RAM:08X} nor the known 353027 value 0x000D0200. "
+              f"Confirm you have the CYBT_353027_EVAL minidriver.hex.")
     md = bytearray()
     for a, d in md_segs:
         md.extend(b"\xff" * (a - (base + len(md))))

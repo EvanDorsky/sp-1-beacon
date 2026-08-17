@@ -151,25 +151,54 @@ Safety properties, verified this build:
   refuses and the compiler proved the entire write path dead (the DS blob was
   even dropped from the image).
 
-**Bench-open questions (resolve on hardware before/while running):**
-1. **Minidriver identity + launch address.** This BSP's `uart.hex` loads at
-   `0x000D0200` (launch `0x000D0201`, Thumb), NOT the older doc's `0x00220000`.
-   `gen_blobs.py` derives the address from the hex and reports it; confirm this
-   is the real download minidriver (vs. the Programming-Tools `minidriver.hex`)
-   before an armed run.
-2. **uart0 flow control.** `download.overlay` disables `hw-flow-control` for
-   poll TX; if entry stalls, that's the first suspect.
-3. **DS base = the flash-map trap below.**
+**Bench-open questions:**
+1. **Minidriver identity + launch address — RESOLVED.** The doc-named file is
+   `.../ModusToolboxProgtools-1.9/mtb-programmer/.../BT/CYBT_353027_EVAL/
+   minidriver.hex`; its `20706A2_OCF.btp` / `CYW20706A2_IDFILE.txt` neighbors
+   are exactly as `reflashing-the-module.md` §1a describes, and the SFLASH
+   `.btp` names it `uart_legacy_ramcfg_only.hex` (the §7 name). It is
+   **byte-identical to the BSP's `uart.hex`** and loads at `0x0D0200` (launch
+   `0x0D0201`, Thumb). The docs' `0x00220000` is stale from an older SDK; §7
+   also says to take the address from the hex's type-05 record, which
+   `gen_blobs.py` does — so `0x0D0200` is correct, not a discrepancy.
+2. **uart0 flow control — monitor on hardware.** `download.overlay` disables
+   `hw-flow-control` for poll TX; if download-mode entry stalls, that's the
+   first suspect.
+3. **DS base — RESOLVED (see below): the app is now built for `0xFF003000`.**
 
-## Flash-map note for the reflash (M4)
+## Flash-map: the SP-1 build targets DS `0xFF003000` (done)
 
-The stock build targets the eval board's `.btp`: `ConfigDSLocation = 0x4000`.
-**The SP-1 module's Static Section points its DS base at `0xFF003000`**
-(`findings.md`, and feldd's flasher used DS_FLOOR 0xFF003000), so the SP-1
-artifact must be built with `ConfigDSLocation = 0x3000` (or post-processed),
-and the flasher's identity gate must verify the unit's actual SS type-0x02 DS
-pointer matches the image's base before writing. The BSP also ships a
-`CYBT-353027-EVAL-SFLASH.btp` variant (the default btp says
-`DLConfigTargeting = "EEPROM"`); which targeting feldd's build used is not
-recorded — resolve against the SS dump before the armed write. As always:
-DS-only Upgrade Download, never chip-erase (`README.md`'s safety headline).
+The eval BSP `.btp` puts DS at `ConfigDSLocation = 0x4000` (→ `0xFF004000`),
+but the **SP-1 module's Static Section points its DS base at `0xFF003000`**
+(`findings.md`; VS is `0xFF001000..0xFF002000` per the btp, so `0xFF003000` is
+safely above it). So the SP-1 artifact is built with a modified btp:
+
+```
+# 1. minidriver (Programming Tools; identical to the BSP uart.hex)
+MD=".../ModusToolboxProgtools-1.9/mtb-programmer/ModusToolbox Programmer.app/\
+Contents/mtb-programmer/BT/CYBT_353027_EVAL/minidriver.hex"
+
+# 2. build the module app for DS 0xFF003000 (0x3000) instead of the eval 0x4000
+cd ~/src/sp-1-ble-radio/LE_Hello_Sensor
+sed 's/ConfigDSLocation = 16384/ConfigDSLocation = 12288/' \
+  .../TARGET_CYBT-353027-EVAL/release-*/CYBT-353027-EVAL-SFLASH.btp > CYBT-353027-EVAL-SP1.btp
+make build CY_CORE_BTP="$PWD/CYBT-353027-EVAL-SP1.btp"   # -> DS available start 0xFF003000
+
+# 3. embed minidriver + the 0xFF003000 DS image into the gitignored blob header
+cd ~/src/beacon-sp-1
+scripts/gen_blobs.py --minidriver "$MD" \
+  --ds ~/src/sp-1-ble-radio/LE_Hello_Sensor/build/CYBT-353027-EVAL/Debug/BLE_HelloSensor_download.hex \
+  --ds-base 0xFF003000
+
+# 4. build the flasher (dry-run first, then armed)
+scripts/fw.sh dl        # then, only after the dry-run passes on hardware:
+scripts/fw.sh dlarm
+```
+
+`CYBT_DS_BASE` in `cybt_dl.h` is `0xFF003000` to match; the identity gate reads
+the unit's live SS and refuses unless its type-0x02 DS pointer equals that. A
+blob built for any other base is rejected by `ds_plan()` (verified). The btp's
+`DLSectorEraseMode = "Chip erase"` only affects Infineon's ChipLoad, which this
+flasher does not use — our path is WRITE_RAM DS-only, never chip-erase
+(`README.md`'s safety headline). Build-verified: the armed flasher links the
+`0xFF003000` DS image and passes the plan; not yet hardware-run.
