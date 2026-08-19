@@ -33,8 +33,9 @@ try:
 except ImportError:
     sys.exit("pyserial required:  pip3 install pyserial  (or use: ./scripts/fw.sh monitordump)")
 
-START_RE = re.compile(rb"^DUMPSTART ([0-9A-Fa-f]+) (\d+)\s*$")
+START_RE = re.compile(rb"^DUMPSTART ([0-9A-Fa-f]+) (\d+) (\d+)\s*$")
 END_RE = re.compile(rb"^DUMPEND crc32=([0-9A-Fa-f]+)\s*$")
+ACK = b"A"   # per-chunk flow-control ACK (backpressure so the device can't outrun USB)
 
 
 def find_port(explicit):
@@ -87,26 +88,33 @@ def main():
         if m:
             base = int(m.group(1), 16)
             length = int(m.group(2))
+            csize = int(m.group(3))
             break
         if line == b"DUMPABORT":
             sys.exit("firmware aborted the dump (READ_RAM failed) — see the console log")
         if line:
             print(f"  | {line.decode('utf-8', 'replace')}")
 
-    print(f"DUMPSTART base=0x{base:08X} len={length} — receiving...")
+    print(f"DUMPSTART base=0x{base:08X} len={length} chunk={csize} — receiving...")
 
-    # Phase 2: read exactly `length` raw bytes (length-delimited).
+    # Phase 2: read one chunk (exact count), then ACK it — flow control so the
+    # device never outruns USB. Repeat until `length` bytes.
     data = bytearray()
-    last = time.monotonic()
     while len(data) < length:
-        chunk = ser.read(min(4096, length - len(data)))
-        if chunk:
-            data += chunk
-            last = time.monotonic()
-            if len(data) % 65536 < 4096:
-                print(f"  {len(data)}/{length} bytes ({100*len(data)//length}%)")
-        elif time.monotonic() - last > 15:
-            sys.exit(f"stalled at {len(data)}/{length} bytes")
+        want = min(csize, length - len(data))
+        buf = b""
+        last = time.monotonic()
+        while len(buf) < want:
+            r = ser.read(want - len(buf))
+            if r:
+                buf += r
+                last = time.monotonic()
+            elif time.monotonic() - last > 15:
+                sys.exit(f"stalled at {len(data) + len(buf)}/{length} bytes")
+        data += buf
+        ser.write(ACK)                 # ACK this chunk -> device sends the next
+        if len(data) % 65536 < csize:
+            print(f"  {len(data)}/{length} bytes ({100*len(data)//length}%)")
 
     host_crc = zlib.crc32(data) & 0xFFFFFFFF
 

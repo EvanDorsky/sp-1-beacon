@@ -32,7 +32,7 @@
 
 /* Bump this whenever the dump firmware changes, so the console banner proves
  * which build is actually flashed (a stale .bin looks identical otherwise). */
-#define DUMP_BUILD_TAG "pace16-noWQ"
+#define DUMP_BUILD_TAG "ack-rxtest"
 
 /* The USB-CDC console UART. We write the raw stream to it directly with
  * uart_poll_out (synchronous, ordered) rather than printk (async), so the
@@ -77,6 +77,25 @@ static void con_str(const char *s)
     con_raw((const uint8_t *)s, strlen(s));
 }
 
+/* Wait for one host byte (the per-chunk ACK) — the flow-control backpressure
+ * that stops the device outrunning USB delivery. It's a poll-in loop, NOT a
+ * block: it yields (so the USB stack delivers the chunk we just sent and
+ * receives the ACK), feeds the WDT, and honours a •• hold. Waits indefinitely
+ * (escapable via ••) rather than resetting, so a dead host doesn't corrupt a
+ * retry. */
+static void wait_ack(void)
+{
+    uint8_t b;
+    for (;;) {
+        feed_wdt();
+        escape_check();
+        if (uart_poll_in(con, &b) == 0) {
+            return;
+        }
+        k_msleep(1);
+    }
+}
+
 void bt_dump_run(void)
 {
     usbdev_start();
@@ -98,26 +117,34 @@ void bt_dump_run(void)
     con_str("\nDUMP: attach the receiver, then send any byte to begin "
             "(or it starts on its own in ~15 s).\n");
 
-    /* Handshake: wait up to ~15 s for a host byte. A passive reader that's
-     * already attached still catches the stream when the timeout fires. */
+    /* Handshake: wait up to ~15 s for a host byte. This ALSO tests the device
+     * RX path (host->device) that the per-chunk ACK depends on — if it times
+     * out, poll_in isn't receiving and ACK flow control will hang. */
+    bool rx_ok = false;
     {
         int64_t deadline = k_uptime_get() + 15000;
         uint8_t b;
         while (k_uptime_get() < deadline) {
             feed_wdt();
             if (uart_poll_in(con, &b) == 0) {
+                rx_ok = true;
                 break;
             }
             k_msleep(50);
         }
     }
+    printk("DUMP: handshake %s -> device RX %s\n",
+           rx_ok ? "got host byte" : "TIMED OUT",
+           rx_ok ? "works, ACK flow control OK" :
+                   "NOT receiving: ACK will hang (poll_in broken on the console CDC)");
 
     /* START marker. After this, ONLY flash bytes go out until DUMPEND — no
      * printk in this window (bt_wire_cmd_cc is silent on success; a failure
      * aborts the stream, which the host detects as a short read). */
     {
-        char hdr[48];
-        snprintf(hdr, sizeof(hdr), "\nDUMPSTART %08X %u\n", base, len);
+        /* base, total len, and the chunk size the host must ACK after. */
+        char hdr[64];
+        snprintf(hdr, sizeof(hdr), "\nDUMPSTART %08X %u %u\n", base, len, CYBT_READ_CHUNK);
         con_str(hdr);
     }
 
@@ -141,8 +168,8 @@ void bt_dump_run(void)
             break;
         }
         crc = crc32_ieee_update(crc, data, chunk);
-        con_raw(data, chunk);
-        feed_wdt();
+        con_raw(data, chunk);          /* one chunk (<= ring size) — no overflow */
+        wait_ack();                    /* ...then wait for the host to drain+ACK it */
     }
 
     if (ok) {
