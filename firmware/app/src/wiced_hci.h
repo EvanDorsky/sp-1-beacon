@@ -37,6 +37,13 @@
  * in a non-connectable advertisement and (re)starts advertising. feldd's
  * shipped module app ignores this code, so sending it is always harmless. */
 #define WHCI_FELDD_SET_STATE  0x10
+/* Events the M3b beacon app sends back in the FELDD group: READY (app up / ping
+ * reply) and STATE_ACK, whose payload[0] echoes the seq of the SET_STATE it just
+ * applied. The host watches for STATE_ACK to know a broadcast actually started —
+ * the first SET_STATE after a module cold boot can arrive before its BLE stack
+ * is up, so nothing advertises and no ack comes back until the host re-sends. */
+#define WHCI_FELDD_READY      0x80
+#define WHCI_FELDD_STATE_ACK  0x81
 
 #define WHCI_OPCODE(group, code) ((uint16_t)(((uint16_t)(group) << 8) | (code)))
 #define WHCI_GROUP(opcode)       ((uint8_t)((opcode) >> 8))

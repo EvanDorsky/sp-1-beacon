@@ -20,8 +20,9 @@
 
 /* How long after releasing reset before we drop the module's CTS low (allowing
  * it to transmit). Must be comfortably past the ROM's boot-time strap sample of
- * CTS; 50 ms is far beyond the ~10 ms strap timing in the docs. */
-#define STRAP_SAFE_MS 50
+ * CTS; 20 ms is a safe ~2x the ~10 ms strap timing in the docs (was 50 —
+ * trimmed to shave wake latency; the module's cold boot dominates the rest). */
+#define STRAP_SAFE_MS 20
 
 /* If the app hasn't produced a single frame this long after boot, say so on the
  * console (once) — module state stays BOOTING and frames are still logged if
@@ -33,6 +34,7 @@ static const struct device *uart = DEVICE_DT_GET(DT_NODELABEL(uart0));
 static enum module_state state = MODULE_OFF;
 static int64_t boot_t;
 static bool quiet_warned;
+static volatile int last_ack_seq = -1;   /* seq echoed by the latest STATE_ACK */
 
 static struct whci_parser parser;
 
@@ -103,6 +105,7 @@ void module_link_power(bool on)
         state = MODULE_BOOTING;
         boot_t = k_uptime_get();
         quiet_warned = false;
+        last_ack_seq = -1;   /* fresh boot: no state acked yet */
         printk("BT: module reset released (normal boot)\n");
     } else {
         if (state == MODULE_OFF) {
@@ -118,6 +121,11 @@ void module_link_power(bool on)
 enum module_state module_link_state(void)
 {
     return state;
+}
+
+int module_link_last_ack_seq(void)
+{
+    return last_ack_seq;
 }
 
 static void log_frame(const struct whci_frame *f)
@@ -148,14 +156,18 @@ void module_link_poll(void)
             continue;
         }
         log_frame(&f);
-        /* Any event in the FELDD private group proves the app is up. The
-         * exact READY event code isn't documented in this tree, so liveness
-         * is "first 0xF0-group frame" — the bench log shows the real code. */
-        if (state == MODULE_BOOTING && f.kind == WHCI_PKT_WICED &&
-            WHCI_GROUP(f.opcode) == WHCI_GROUP_FELDD) {
-            state = MODULE_UP;
-            printk("BT: module UP (first FELDD event %d ms after reset)\n",
-                   (int)(k_uptime_get() - boot_t));
+        /* Any event in the FELDD private group proves the app is up; STATE_ACK
+         * additionally confirms a SET_STATE was applied (advertising started)
+         * and echoes its seq, which the broadcast loop uses to stop re-sending. */
+        if (f.kind == WHCI_PKT_WICED && WHCI_GROUP(f.opcode) == WHCI_GROUP_FELDD) {
+            if (state == MODULE_BOOTING) {
+                state = MODULE_UP;
+                printk("BT: module UP (first FELDD event %d ms after reset)\n",
+                       (int)(k_uptime_get() - boot_t));
+            }
+            if (WHCI_CODE(f.opcode) == WHCI_FELDD_STATE_ACK && f.len >= 1) {
+                last_ack_seq = f.payload[0];
+            }
         }
     }
 

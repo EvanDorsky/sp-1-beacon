@@ -31,9 +31,14 @@ int  module_link_init(void);          /* claim pins/UART; module stays in reset 
 void module_link_power(bool on);      /* release / assert the module's reset */
 enum module_state module_link_state(void);
 
-/* Drain module RX through the codec, log every frame, advance BOOTING->UP.
- * Call every control-loop tick. */
+/* Drain module RX through the codec, log every frame, advance BOOTING->UP,
+ * and record STATE_ACKs. Call every control-loop tick. */
 void module_link_poll(void);
+
+/* The seq echoed in the most recent STATE_ACK (the module confirming it applied
+ * a SET_STATE and started advertising), or -1 if none since the last power-on.
+ * The broadcast loop re-sends SET_STATE until this matches the current seq. */
+int  module_link_last_ack_seq(void);
 
 /* Send a FELDD-group command (wiced_hci.h WHCI_FELDD_*). Returns 0, or -1 if
  * the module is not powered. */
