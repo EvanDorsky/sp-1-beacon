@@ -25,6 +25,8 @@
 #include <zephyr/drivers/uart.h>
 #include <zephyr/sys/printk.h>
 #include <zephyr/sys/crc.h>
+#include <hal/nrf_gpio.h>
+#include "sp1_board.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -33,15 +35,33 @@
  * binary can't be interleaved by a queued log line. */
 static const struct device *con = DEVICE_DT_GET(DT_NODELABEL(cdc_acm_uart0));
 
+/* Time-based •• (SP1_FUNC_BTN, direct GPIO — needs no rail/controls) escape,
+ * callable anywhere during the dump: hold •• ~1.5 s to power off. Time-based so
+ * it triggers regardless of how often it's polled. */
+static int64_t func_since = -1;
+static void escape_check(void)
+{
+    if (nrf_gpio_pin_read(SP1_FUNC_BTN) == 0) {
+        int64_t now = k_uptime_get();
+        if (func_since < 0) {
+            func_since = now;
+        } else if (now - func_since >= 1500) {
+            bt_wire_power_off();   /* never returns */
+        }
+    } else {
+        func_since = -1;
+    }
+}
+
 static void con_raw(const uint8_t *b, size_t n)
 {
     for (size_t i = 0; i < n; i++) {
-        /* Feed the WDT as we stream: if the host briefly stops draining, a
-         * blocked poll_out shouldn't trip the ~8 s watchdog. (A fully-dead host
-         * still eventually resets -> bootloop, which is recoverable; it can't
-         * dead-end.) */
-        if ((i & 0x3F) == 0) {
-            feed_wdt();
+        /* Feed BEFORE every (possibly blocking) poll_out so a slow host can't
+         * starve the ~8 s watchdog mid-byte. A fully-dead host still eventually
+         * resets -> bootloop, which is recoverable; it can't dead-end. */
+        feed_wdt();
+        if ((i & 0x1F) == 0) {
+            escape_check();        /* •• hold powers off mid-stream */
         }
         uart_poll_out(con, b[i]);
     }
@@ -96,9 +116,14 @@ void bt_dump_run(void)
         con_str(hdr);
     }
 
+    /* •• is a direct GPIO (main configured it as input-pullup); make sure. */
+    nrf_gpio_cfg_input(SP1_FUNC_BTN, NRF_GPIO_PIN_PULLUP);
+
     uint32_t crc = 0;
     bool ok = true;
     for (uint32_t off = 0; off < len; off += CYBT_READ_CHUNK) {
+        feed_wdt();
+        escape_check();   /* •• hold powers off between chunks too */
         uint8_t chunk = (len - off) < CYBT_READ_CHUNK ? (uint8_t)(len - off) : CYBT_READ_CHUNK;
         uint8_t cmd[16], data[CYBT_READ_CHUNK];
         uint16_t dlen = 0;
