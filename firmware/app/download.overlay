@@ -10,3 +10,21 @@
 &uart0 {
     /delete-property/ hw-flow-control;
 };
+
+/*
+ * DEV-ONLY console flow control. printk on this board goes through the UART
+ * console -> uart_poll_out on cdc_acm_uart0, one char at a time. With no
+ * flow control, cdc_acm_poll_out() DISCARDS bytes the instant its tx ring
+ * fills (usbd_cdc_acm.c: "Ring buffer full, discard data") — the ~450-byte
+ * dump stall. Setting hw-flow-control makes poll_out BLOCK (k_msleep) until
+ * the ring drains: lossless, just slower. A bigger ring cuts the block-spin.
+ *
+ * SAFE for dev builds only: if nothing reads the port, poll_out blocks and
+ * the ~8 s WDT resets us (feed_wdt runs before the blocking printk each
+ * chunk) — recoverable. The shipping runtime build must NOT enable this
+ * (the field beacon has no host reading the console -> would WDT-loop).
+ */
+&cdc_acm_uart0 {
+    hw-flow-control;
+    tx-fifo-size = <8192>;   /* 8x the 1024 default; static SRAM, dev-only, RAM is cheap here */
+};

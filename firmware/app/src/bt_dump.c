@@ -3,16 +3,19 @@
  *
  * Pure read: enters download mode (shared bt_wire) and loops READ_RAM over the
  * whole 512 KB serial flash at the ROM level — no minidriver, no WRITE_RAM, no
- * flash-write code compiled in. The raw bytes stream over the USB-CDC console
- * between DUMPSTART/DUMPEND markers; the nRF computes a CRC-32 the host verifies.
+ * flash-write code compiled in.
  *
- * Wire framing (host: scripts/dump_recv.py):
- *   [setup text lines...]
+ * Delivery: each chunk is HEX-encoded and sent with printk, one line per chunk
+ * (">" + 2 hex chars/byte). Raw uart_poll_out on the CDC only ever flushed the
+ * initial ~512 B ring and then stopped (it doesn't re-kick the USB IN transfer);
+ * printk goes through the console driver, which re-kicks every call and
+ * sustains delivery — the same path that reliably carries all the status text.
+ * The per-chunk module read (rx_frame, which yields) paces the output so printk
+ * never floods. The nRF computes a CRC-32 over the raw bytes; the host decodes
+ * the hex and re-checks. Wire framing (host: scripts/dump_recv.py):
  *   "DUMPSTART <base8hex> <len_dec>\n"
- *   <len raw bytes>                     <- ONLY the flash contents
- *   "\nDUMPEND crc32=<8hex>\n"          <- stop signal + nRF checksum
- * The host reads exactly <len> bytes (length-delimited, not marker-delimited, so
- * a marker byte in the flash can't false-trigger), then compares its own CRC-32.
+ *   ">FFA0..\n"  (one hex line per chunk, in order)   <- the flash contents
+ *   "DUMPEND crc32=<8hex>\n"
  */
 #include "bt_dump.h"
 #include "bt_wire.h"
@@ -20,28 +23,16 @@
 #include "usbdev.h"
 #include "wdt.h"
 #include <zephyr/kernel.h>
-#include <zephyr/device.h>
-#include <zephyr/devicetree.h>
-#include <zephyr/drivers/uart.h>
 #include <zephyr/sys/printk.h>
 #include <zephyr/sys/crc.h>
 #include <hal/nrf_gpio.h>
 #include "sp1_board.h"
-#include <stdio.h>
-#include <string.h>
 
-/* Bump this whenever the dump firmware changes, so the console banner proves
- * which build is actually flashed (a stale .bin looks identical otherwise). */
-#define DUMP_BUILD_TAG "ack-rxtest"
+/* Bump on every dump-firmware change so the banner proves which build is live. */
+#define DUMP_BUILD_TAG "hex-printk"
 
-/* The USB-CDC console UART. We write the raw stream to it directly with
- * uart_poll_out (synchronous, ordered) rather than printk (async), so the
- * binary can't be interleaved by a queued log line. */
-static const struct device *con = DEVICE_DT_GET(DT_NODELABEL(cdc_acm_uart0));
-
-/* Time-based •• (SP1_FUNC_BTN, direct GPIO — needs no rail/controls) escape,
- * callable anywhere during the dump: hold •• ~1.5 s to power off. Time-based so
- * it triggers regardless of how often it's polled. */
+/* Time-based •• (SP1_FUNC_BTN, direct GPIO) escape: hold •• ~1.5 s to power off.
+ * Polled between chunks; time-based so poll frequency doesn't matter. */
 static int64_t func_since = -1;
 static void escape_check(void)
 {
@@ -57,49 +48,22 @@ static void escape_check(void)
     }
 }
 
-static void con_raw(const uint8_t *b, size_t n)
+static void printk_hex_line(const uint8_t *d, uint8_t n)
 {
-    for (size_t i = 0; i < n; i++) {
-        /* Yield BEFORE each small block so the USB-CDC drains the TX ring before
-         * we write more — poll_out must never hit a full ring (it blocks there
-         * and the stream stalls ~512 B in). feed_wdt + •• escape ride along. */
-        if ((i & 0x0F) == 0) {
-            feed_wdt();
-            escape_check();        /* •• hold powers off mid-stream */
-            k_msleep(1);
-        }
-        uart_poll_out(con, b[i]);
+    static const char H[] = "0123456789ABCDEF";
+    char buf[2 * CYBT_READ_CHUNK + 1];
+    for (uint8_t i = 0; i < n; i++) {
+        buf[2 * i]     = H[d[i] >> 4];
+        buf[2 * i + 1] = H[d[i] & 0x0F];
     }
-}
-
-static void con_str(const char *s)
-{
-    con_raw((const uint8_t *)s, strlen(s));
-}
-
-/* Wait for one host byte (the per-chunk ACK) — the flow-control backpressure
- * that stops the device outrunning USB delivery. It's a poll-in loop, NOT a
- * block: it yields (so the USB stack delivers the chunk we just sent and
- * receives the ACK), feeds the WDT, and honours a •• hold. Waits indefinitely
- * (escapable via ••) rather than resetting, so a dead host doesn't corrupt a
- * retry. */
-static void wait_ack(void)
-{
-    uint8_t b;
-    for (;;) {
-        feed_wdt();
-        escape_check();
-        if (uart_poll_in(con, &b) == 0) {
-            return;
-        }
-        k_msleep(1);
-    }
+    buf[2 * n] = '\0';
+    printk(">%s\n", buf);
 }
 
 void bt_dump_run(void)
 {
     usbdev_start();
-    for (int i = 0; i < 25; i++) {   /* WDT-fed USB settle */
+    for (int i = 0; i < 30; i++) {   /* WDT-fed USB settle — start monitordump first */
         feed_wdt();
         k_msleep(100);
     }
@@ -113,69 +77,50 @@ void bt_dump_run(void)
     uint32_t base = CYBT_FLASH_BASE;                  /* 0xFF000000 */
     uint32_t len  = CYBT_FLASH_END - CYBT_FLASH_BASE; /* 0x80000 = 512 KB */
 
-    /* Prompt on the same synchronous path as the stream, so ordering is exact. */
-    con_str("\nDUMP: attach the receiver, then send any byte to begin "
-            "(or it starts on its own in ~15 s).\n");
+    nrf_gpio_cfg_input(SP1_FUNC_BTN, NRF_GPIO_PIN_PULLUP);   /* •• escape */
 
-    /* Handshake: wait up to ~15 s for a host byte. This ALSO tests the device
-     * RX path (host->device) that the per-chunk ACK depends on — if it times
-     * out, poll_in isn't receiving and ACK flow control will hang. */
-    bool rx_ok = false;
-    {
-        int64_t deadline = k_uptime_get() + 15000;
-        uint8_t b;
-        while (k_uptime_get() < deadline) {
-            feed_wdt();
-            if (uart_poll_in(con, &b) == 0) {
-                rx_ok = true;
-                break;
-            }
-            k_msleep(50);
-        }
-    }
-    printk("DUMP: handshake %s -> device RX %s\n",
-           rx_ok ? "got host byte" : "TIMED OUT",
-           rx_ok ? "works, ACK flow control OK" :
-                   "NOT receiving: ACK will hang (poll_in broken on the console CDC)");
-
-    /* START marker. After this, ONLY flash bytes go out until DUMPEND — no
-     * printk in this window (bt_wire_cmd_cc is silent on success; a failure
-     * aborts the stream, which the host detects as a short read). */
-    {
-        /* base, total len, and the chunk size the host must ACK after. */
-        char hdr[64];
-        snprintf(hdr, sizeof(hdr), "\nDUMPSTART %08X %u %u\n", base, len, CYBT_READ_CHUNK);
-        con_str(hdr);
-    }
-
-    /* •• is a direct GPIO (main configured it as input-pullup); make sure. */
-    nrf_gpio_cfg_input(SP1_FUNC_BTN, NRF_GPIO_PIN_PULLUP);
+    printk("DUMPSTART %08X %u\n", base, len);
 
     uint32_t crc = 0;
     bool ok = true;
+    int resyncs = 0;                     /* total download-mode re-entries */
     for (uint32_t off = 0; off < len; off += CYBT_READ_CHUNK) {
         feed_wdt();
-        escape_check();   /* •• hold powers off between chunks too */
+        escape_check();   /* •• hold powers off between chunks */
         uint8_t chunk = (len - off) < CYBT_READ_CHUNK ? (uint8_t)(len - off) : CYBT_READ_CHUNK;
         uint8_t cmd[16], data[CYBT_READ_CHUNK];
         uint16_t dlen = 0;
         int n = cybt_cmd_read_ram(cmd, sizeof(cmd), base + off, chunk);
-        if (!bt_wire_cmd_cc(cmd, n, CYBT_OP_READ_RAM, data, sizeof(data), &dlen, 1000) || dlen != chunk) {
-            /* Abort: the host sees fewer than <len> bytes and reports it. */
-            con_str("\nDUMPABORT\n");
-            printk("DUMP: READ_RAM failed at 0x%08X — aborted\n", base + off);
-            ok = false;
+
+        /* The module has gone silent mid-dump, reproducibly at one address.
+         * Tell a recoverable dropout apart from a hard ROM read boundary: on a
+         * failed read, reset the module back into download mode
+         * (bt_wire_enter_download = RST + flush + autobaud, all read-only) and
+         * retry the SAME chunk. Recovers -> it was a dropout (session timeout);
+         * still dead after a fresh reset -> genuine boundary. Never writes. */
+        int tries = 0;
+        while (!bt_wire_cmd_cc(cmd, n, CYBT_OP_READ_RAM, data, sizeof(data), &dlen, 1000) || dlen != chunk) {
+            feed_wdt();
+            escape_check();
+            if (++tries > 5) {
+                printk("DUMPABORT at 0x%08X (unrecovered after %d resyncs)\n", base + off, resyncs);
+                ok = false;
+                break;
+            }
+            printk("DL: read stalled at 0x%08X — re-entering download mode (retry %d)\n", base + off, tries);
+            resyncs++;
+            bt_wire_enter_download();     /* RST + flush + autobaud; read-only */
+            dlen = 0;
+        }
+        if (!ok) {
             break;
         }
         crc = crc32_ieee_update(crc, data, chunk);
-        con_raw(data, chunk);          /* one chunk (<= ring size) — no overflow */
-        wait_ack();                    /* ...then wait for the host to drain+ACK it */
+        printk_hex_line(data, chunk);   /* re-kicks the USB transfer every line */
     }
 
     if (ok) {
-        char tr[48];
-        snprintf(tr, sizeof(tr), "\nDUMPEND crc32=%08X\n", crc);
-        con_str(tr);
+        printk("DUMPEND crc32=%08X\n", crc);
         printk("DUMP: complete — %u bytes, crc32=%08X\n", len, crc);
     }
     bt_wire_halt("DUMP: halted.");
