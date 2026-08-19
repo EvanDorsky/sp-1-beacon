@@ -94,7 +94,11 @@ static bool rx_frame(struct whci_frame *out, int timeout_ms)
                 return true;
             }
         }
-        k_busy_wait(100);
+        /* SLEEP, don't busy-wait: yields the CPU so lower-priority threads run
+         * — critically the USB-CDC TX workqueue that flushes the console. A
+         * busy-wait here starved it and the dump stalled once the CDC TX ring
+         * filled (~512 B). The RX ISR keeps filling the ring during the sleep. */
+        k_msleep(1);
     }
     return false;
 }

@@ -60,8 +60,11 @@ static void con_raw(const uint8_t *b, size_t n)
          * starve the ~8 s watchdog mid-byte. A fully-dead host still eventually
          * resets -> bootloop, which is recoverable; it can't dead-end. */
         feed_wdt();
-        if ((i & 0x1F) == 0) {
+        if ((i & 0x3F) == 0) {
             escape_check();        /* •• hold powers off mid-stream */
+            /* Yield so the USB-CDC TX workqueue drains the ring — otherwise a
+             * tight write loop fills the ~512 B ring and poll_out stalls. */
+            k_msleep(1);
         }
         uart_poll_out(con, b[i]);
     }
