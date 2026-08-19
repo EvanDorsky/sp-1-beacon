@@ -202,7 +202,11 @@ static void boot_signature(void)
 /* ---- the broadcast state machine ---- */
 
 #define POLL_IDLE_MS    40      /* idle scan cadence (rail duty-cycled) */
-#define POLL_ON_MS      20      /* active scan cadence (rail held on) */
+#define POLL_ON_MS      8       /* active scan cadence (rail held on). The button
+                                 * debounce is a 3-read sticky filter designed for
+                                 * ~8 ms scans; at the old 20 ms a press took ~40 ms
+                                 * of hold to register and short taps were dropped
+                                 * before the press latch ever saw them. */
 #define RAIL_SETTLE_US  500     /* rail-up to first sample. BENCH-TUNE: if idle
                                  * scans misread (phantom wakes / missed
                                  * presses), this is the first knob. */
@@ -220,7 +224,8 @@ static void boot_signature(void)
                                  * this from first broadcast, so a module that stops
                                  * acking can't wedge the latch (and idle) forever */
 #define BATT_PERIOD_MS  5000    /* battery sample cadence while awake */
-#define FUNC_OFF_TICKS  (5000 / POLL_ON_MS)
+#define FUNC_OFF_MS     5000    /* •• held this long powers the device off */
+#define FUNC_TAP_MS     1250    /* •• released before this = a status tap, not a hold */
 
 enum bc_state { BC_IDLE, BC_WAKE, BC_ON };
 
@@ -387,7 +392,7 @@ int main(void)
 
     st.battery = BEACON_BATTERY_UNKNOWN;
     last_sent = st;
-    uint32_t func_held = 0;
+    int64_t  func_since = -1;   /* uptime •• was first seen held (armed), or -1 */
     int      func_armed = 0;    /* honor •• only after it has read released once */
     bc_go_idle();
 
@@ -496,14 +501,20 @@ int main(void)
             power_off();
         }
 
-        /* •• long-hold = power off; short tap logs status (+ pings when up). */
+        /* •• long-hold = power off; short tap logs status (+ pings when up).
+         * Time-based so it stays ~5 s regardless of loop cadence (idle 40 ms vs
+         * active 8 ms) — the old tick counter drifted with POLL_*_MS. */
         if (nrf_gpio_pin_read(SP1_FUNC_BTN) == 0) {
-            if (func_armed && ++func_held >= FUNC_OFF_TICKS) {
-                printk("•• held: powering off\n");
-                power_off();
+            if (func_armed) {
+                if (func_since < 0) {
+                    func_since = k_uptime_get();
+                } else if (k_uptime_get() - func_since >= FUNC_OFF_MS) {
+                    printk("•• held: powering off\n");
+                    power_off();
+                }
             }
         } else {
-            if (func_held > 0 && func_held < FUNC_OFF_TICKS / 4) {
+            if (func_since >= 0 && k_uptime_get() - func_since < FUNC_TAP_MS) {
                 printk("•• tap: bc=%d module=%d buttons=%03x faders=%u/%u/%u/%u batt=%u seq=%u\n",
                        (int)bc, (int)module_link_state(), st.buttons,
                        st.fader[0], st.fader[1], st.fader[2], st.fader[3],
@@ -512,7 +523,7 @@ int main(void)
                     (void)module_link_ping();
                 }
             }
-            func_held = 0;
+            func_since = -1;
             func_armed = 1;
         }
 
