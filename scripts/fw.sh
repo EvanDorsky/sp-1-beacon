@@ -65,9 +65,19 @@ case "${1:-}" in
   bin)     do_build "-p" && do_bin ;;
   info)    do_info ;;
   test)    cd "$ROOT/firmware/test" && make clean >/dev/null 2>&1; make test ;;
-  monitor) port=$(ls /dev/cu.usbmodem* 2>/dev/null | head -1)
+  monitor) # Poll for the port (up to ~15 s) and attach the instant it appears, so
+           # you catch the first log lines after a flash/reset — the flasher's
+           # ~2.5 s settle means connecting quickly grabs the banner. Override the
+           # wait with a 2nd arg (seconds): ./scripts/fw.sh monitor 30
+           secs="${2:-15}"; port=""
+           echo "waiting up to ${secs}s for /dev/cu.usbmodem* (reset/plug in the SP-1)..."
+           for _ in $(seq 1 $((secs * 5))); do
+             port=$(ls /dev/cu.usbmodem* 2>/dev/null | head -1)
+             [ -n "$port" ] && break
+             sleep 0.2
+           done
            [ -n "$port" ] && { echo "opening $port (ctrl-a k to quit screen)"; screen "$port" 115200; } \
-             || echo "no /dev/cu.usbmodem* - is the SP-1 plugged in and flashed?" ;;
+             || echo "no /dev/cu.usbmodem* after ${secs}s - is the SP-1 plugged in and flashed?" ;;
   e2e)     shift
            if command -v uv >/dev/null 2>&1; then uv run "$ROOT/scripts/e2e_monitor.py" "$@"
            else python3 "$ROOT/scripts/e2e_monitor.py" "$@"; fi ;;
