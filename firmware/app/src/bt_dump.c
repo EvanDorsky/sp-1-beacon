@@ -36,6 +36,13 @@ static const struct device *con = DEVICE_DT_GET(DT_NODELABEL(cdc_acm_uart0));
 static void con_raw(const uint8_t *b, size_t n)
 {
     for (size_t i = 0; i < n; i++) {
+        /* Feed the WDT as we stream: if the host briefly stops draining, a
+         * blocked poll_out shouldn't trip the ~8 s watchdog. (A fully-dead host
+         * still eventually resets -> bootloop, which is recoverable; it can't
+         * dead-end.) */
+        if ((i & 0x3F) == 0) {
+            feed_wdt();
+        }
         uart_poll_out(con, b[i]);
     }
 }
