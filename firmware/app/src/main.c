@@ -210,6 +210,12 @@ static void boot_signature(void)
                                  * activity before going back to sleep */
 #define WAKE_TIMEOUT_MS 3000    /* module boot watchdog: give up and retry */
 #define KEEPALIVE_MS    1000    /* re-send the unchanged state this often */
+#define SET_STATE_RETRY_MS 50   /* before the module acks, re-send this fast so a
+                                 * cold-boot-race SET_STATE isn't lost for ~1 s */
+#define MIN_PRESS_MS    300     /* hold a press in the broadcast at least this long
+                                 * AFTER it first goes on the air, so a short tap
+                                 * (even one released during the module's cold
+                                 * boot) is advertised + caught before its release */
 #define BATT_PERIOD_MS  5000    /* battery sample cadence while awake */
 #define FUNC_OFF_TICKS  (5000 / POLL_ON_MS)
 
@@ -224,15 +230,28 @@ static struct beacon_state st;         /* live control state */
 static struct beacon_state last_sent;  /* what's currently on the air */
 static uint8_t seq;
 static int64_t wake_t, activity_t, last_send_t, last_batt_t;
+/* Per-button press latch: a press is recorded the instant it's detected and held
+ * in the broadcast state until it has been on the air for MIN_PRESS_MS, so a tap
+ * survives the module's cold boot and reaches the receiver. */
+static bool    vhold[BTN_COUNT];
+static int64_t vhold_t0[BTN_COUNT];    /* uptime the latch first went on air, or -1 */
 
-static void state_send(void)
+static void state_send(const struct beacon_state *s, int64_t now)
 {
     uint8_t payload[BEACON_STATE_LEN];
 
-    (void)beacon_state_encode(&st, seq, payload, sizeof(payload));
+    (void)beacon_state_encode(s, seq, payload, sizeof(payload));
     (void)module_link_send(WHCI_FELDD_SET_STATE, payload, BEACON_STATE_LEN);
-    last_sent = st;
-    last_send_t = k_uptime_get();
+    last_sent = *s;
+    last_send_t = now;
+    /* Stamp when each still-pending press first went on the air, so its release
+     * dwell counts from here — not from the physical press, which may have
+     * happened (and ended) during the module's cold boot. */
+    for (int i = 0; i < BTN_COUNT; i++) {
+        if ((s->buttons & (uint16_t)(1u << i)) && vhold[i] && vhold_t0[i] < 0) {
+            vhold_t0[i] = now;
+        }
+    }
 }
 
 /* Scan buttons + faders into st. Fader reads are gated on the rail being
@@ -247,8 +266,12 @@ static int scan_controls(void)
         printk("BTN %s %s\n", btn_name[evt[i].idx], evt[i].pressed ? "down" : "up");
         if (evt[i].pressed) {
             st.buttons |= (uint16_t)(1u << evt[i].idx);
+            if (!vhold[evt[i].idx]) {          /* new press: latch it the instant it's detected */
+                vhold[evt[i].idx] = true;
+                vhold_t0[evt[i].idx] = -1;     /* not yet broadcast */
+            }
         } else {
-            st.buttons &= (uint16_t)~(1u << evt[i].idx);
+            st.buttons &= (uint16_t)~(1u << evt[i].idx);   /* physical release; the latch dwell releases it on air */
         }
     }
 
@@ -263,12 +286,36 @@ static int scan_controls(void)
     return n;
 }
 
+/* Build the state to broadcast: the scanned state, but with each latched press
+ * held on the air until MIN_PRESS_MS after it first went out (or, until then,
+ * unconditionally). Expires latches whose dwell has elapsed. Call once per tick. */
+static void tx_state(struct beacon_state *out, int64_t now)
+{
+    *out = st;
+    uint16_t b = st.buttons;
+    for (int i = 0; i < BTN_COUNT; i++) {
+        if (!vhold[i]) {
+            continue;
+        }
+        bool phys = (st.buttons & (uint16_t)(1u << i)) != 0;
+        if (!phys && vhold_t0[i] >= 0 && now - vhold_t0[i] >= MIN_PRESS_MS) {
+            vhold[i] = false;                  /* released + on air long enough: let go */
+        } else {
+            b |= (uint16_t)(1u << i);          /* held, still dwelling, or not yet broadcast */
+        }
+    }
+    out->buttons = b;
+}
+
 static void bc_go_idle(void)
 {
     (void)module_link_adv(false);          /* courtesy; the reset kills it anyway */
     module_link_power(false);
     controls_rail(0);
     led_pin(SP1_LED1, false);
+    for (int i = 0; i < BTN_COUNT; i++) {  /* drop any pending press latch */
+        vhold[i] = false;
+    }
     bc = BC_IDLE;
     printk("BC: idle (rail duty-cycled, module in reset)\n");
 }
@@ -369,10 +416,14 @@ int main(void)
 
         if (bc == BC_WAKE) {
             if (module_link_state() == MODULE_UP) {
-                printk("BC: on (module boot %d ms)\n", (int)(k_uptime_get() - wake_t));
+                int64_t now = k_uptime_get();
+                printk("BC: on (module boot %d ms)\n", (int)(now - wake_t));
                 (void)module_link_adv(true);   /* feldd-app compat: presence beacon */
+                struct beacon_state txs;
+                tx_state(&txs, now);           /* include any press latched during the boot */
                 seq++;
-                state_send();
+                state_send(&txs, now);
+                activity_t = now;              /* linger from the first broadcast, not from wake */
                 last_batt_t = 0;               /* force a battery sample soon */
                 bc = BC_ON;
             } else if (k_uptime_get() - wake_t > WAKE_TIMEOUT_MS) {
@@ -390,15 +441,29 @@ int main(void)
                     st.battery = (uint8_t)pct;
                 }
             }
-            if (st.buttons != 0) {
-                activity_t = now;              /* holding counts as activity */
-            }
-            if (beacon_state_changed(&last_sent, &st)) {
+            struct beacon_state txs;
+            tx_state(&txs, now);               /* st + latched presses (min on-air hold) */
+
+            bool changed = beacon_state_changed(&last_sent, &txs);
+            if (changed) {
                 seq++;
-                state_send();
+                state_send(&txs, now);
+            }
+            /* Warm-window timer restarts on every new-state broadcast AND while
+             * any button is (virtually) held, so we idle LINGER_MS after the
+             * LAST activity — not LINGER_MS after the first press of a run. */
+            if (changed || txs.buttons != 0) {
                 activity_t = now;
-            } else if (now - last_send_t > KEEPALIVE_MS) {
-                state_send();                  /* same seq: a refresh, not news */
+            }
+            /* Nothing changed: keep (re)sending the current state — fast until
+             * the module acks this seq (the first SET_STATE after a cold boot
+             * can beat the module's BLE stack up), then slow keepalive. */
+            if (!changed) {
+                bool acked = module_link_last_ack_seq() == (int)seq;
+                int64_t due = acked ? KEEPALIVE_MS : SET_STATE_RETRY_MS;
+                if (now - last_send_t >= due) {
+                    state_send(&txs, now);
+                }
             }
             if (now - activity_t > LINGER_MS) {
                 bc_go_idle();
