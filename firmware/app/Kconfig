@@ -6,8 +6,20 @@
 
 source "samples/subsys/usb/common/Kconfig.sample_usbd"
 
+config SP1_BT_DUMP
+	bool "DEV-ONLY: read-only full-flash dump of the CYW20706 module"
+	default n
+	help
+	  Build the read-only flash dumper (bt_dump.c) INSTEAD of the normal beacon
+	  control loop. It enters the module's download ROM and READ_RAMs the whole
+	  512 KB serial flash (SS + VS + DS), streaming the raw bytes over USB-CDC
+	  with an nRF-computed CRC-32 the host re-checks (scripts/dump_recv.py). No
+	  minidriver and NO flash-write code is compiled in — structurally read-only.
+	  Use it to back up the module before an armed write. It never returns.
+
 config SP1_BT_DOWNLOAD
 	bool "DEV-ONLY: CYW20706 module flasher (reflash the radio's DS)"
+	depends on !SP1_BT_DUMP
 	default n
 	help
 	  Build the module flasher (bt_download.c) INSTEAD of the normal beacon

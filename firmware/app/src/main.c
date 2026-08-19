@@ -41,6 +41,9 @@
 #ifdef CONFIG_SP1_BT_DOWNLOAD
 #include "bt_download.h"
 #endif
+#ifdef CONFIG_SP1_BT_DUMP
+#include "bt_dump.h"
+#endif
 
 /* ---- watchdog (verbatim from feldd: ~8 s hang backstop, fed per tick) ---- */
 
@@ -304,6 +307,11 @@ int main(void)
      * The WDT is already started and USB comes up inside bt_download_run; it
      * never returns, so the gate + control loop below are skipped. */
     bt_download_run();
+#endif
+#ifdef CONFIG_SP1_BT_DUMP
+    /* DEV-ONLY read-only flash dumper — same placement/rationale as the flasher;
+     * never returns. */
+    bt_dump_run();
 #endif
 
     charge_standby_gate(wake_reas);

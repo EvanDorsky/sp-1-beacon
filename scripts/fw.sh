@@ -9,6 +9,8 @@
 #   ./scripts/fw.sh monitor    open the SP-1 CDC serial console
 #   ./scripts/fw.sh e2e        press->ping E2E monitor (scripts/e2e_monitor.py)
 #   ./scripts/fw.sh flash      flash sp1_beacon.bin over the bootloader (rome, CLI)
+#   ./scripts/fw.sh dump       build the read-only full-flash dumper
+#   ./scripts/fw.sh monitordump [out.bin]  receive + verify a flash dump
 #   ./scripts/fw.sh clean      remove the build dir
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -35,6 +37,13 @@ do_dlbuild(){ local conf="$1"; cd "$WS" || exit 1
   ZEPHYR_SDK_INSTALL_DIR="$SDK" west build -b sp1 -d build "$APP" -p -- \
     -DBOARD_ROOT="$BOARD_ROOT" \
     -DEXTRA_CONF_FILE="$conf" \
+    -DEXTRA_DTC_OVERLAY_FILE="download.overlay"; }
+
+# Read-only dump build. Like do_dlbuild but needs NO cybt_blobs.h (pure read).
+do_dumpbuild(){ cd "$WS" || exit 1
+  ZEPHYR_SDK_INSTALL_DIR="$SDK" west build -b sp1 -d build "$APP" -p -- \
+    -DBOARD_ROOT="$BOARD_ROOT" \
+    -DEXTRA_CONF_FILE="dump.conf" \
     -DEXTRA_DTC_OVERLAY_FILE="download.overlay"; }
 
 do_bin(){
@@ -83,6 +92,11 @@ case "${1:-}" in
            else python3 "$ROOT/scripts/e2e_monitor.py" "$@"; fi ;;
   dl)      do_dlbuild "download.conf"     && do_bin ;;   # module flasher, DRY-RUN
   dlarm)   do_dlbuild "download-arm.conf" && do_bin ;;   # module flasher, ARMED write
+  dump)    do_dumpbuild && do_bin ;;                     # read-only full-flash dumper
+  monitordump) shift
+           out="${1:-$ROOT/sp1_flash_dump.bin}"
+           if command -v uv >/dev/null 2>&1; then uv run "$ROOT/scripts/dump_recv.py" -o "$out"
+           else python3 "$ROOT/scripts/dump_recv.py" -o "$out"; fi ;;
   flash)   shift
            # CLI flash over the TE bootloader's serial via rome
            # (github.com/softmodded/rome), the same protocol solderless uses.
@@ -97,5 +111,5 @@ case "${1:-}" in
            echo "flashing $BIN_OUT via rome on $port"
            "$ROME" flash -p "$port" "$BIN_OUT" ;;
   clean)   rm -rf "$BUILD" && echo "cleaned $BUILD" ;;
-  *) sed -n '2,13p' "$0" ;;
+  *) sed -n '2,15p' "$0" ;;
 esac
