@@ -30,6 +30,10 @@
 #include <stdio.h>
 #include <string.h>
 
+/* Bump this whenever the dump firmware changes, so the console banner proves
+ * which build is actually flashed (a stale .bin looks identical otherwise). */
+#define DUMP_BUILD_TAG "pace16-noWQ"
+
 /* The USB-CDC console UART. We write the raw stream to it directly with
  * uart_poll_out (synchronous, ordered) rather than printk (async), so the
  * binary can't be interleaved by a queued log line. */
@@ -56,14 +60,12 @@ static void escape_check(void)
 static void con_raw(const uint8_t *b, size_t n)
 {
     for (size_t i = 0; i < n; i++) {
-        /* Feed BEFORE every (possibly blocking) poll_out so a slow host can't
-         * starve the ~8 s watchdog mid-byte. A fully-dead host still eventually
-         * resets -> bootloop, which is recoverable; it can't dead-end. */
-        feed_wdt();
-        if ((i & 0x3F) == 0) {
+        /* Yield BEFORE each small block so the USB-CDC drains the TX ring before
+         * we write more — poll_out must never hit a full ring (it blocks there
+         * and the stream stalls ~512 B in). feed_wdt + •• escape ride along. */
+        if ((i & 0x0F) == 0) {
+            feed_wdt();
             escape_check();        /* •• hold powers off mid-stream */
-            /* Yield so the USB-CDC TX workqueue drains the ring — otherwise a
-             * tight write loop fills the ~512 B ring and poll_out stalls. */
             k_msleep(1);
         }
         uart_poll_out(con, b[i]);
@@ -84,7 +86,7 @@ void bt_dump_run(void)
     }
     bt_wire_init();
 
-    printk("\n=== sp1-beacon FLASH DUMP (read-only, no write path) ===\n");
+    printk("\n=== sp1-beacon FLASH DUMP (read-only) build=%s ===\n", DUMP_BUILD_TAG);
     if (!bt_wire_enter_download()) {
         bt_wire_halt("DUMP: halted (download-mode entry failed).");
     }
