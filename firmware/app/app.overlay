@@ -64,13 +64,18 @@
 };
 
 /* CYW20706 module link UART. 115200 8N1, the module's default framing.
- * hw-flow-control with a CTS-only pinctrl: TX pauses when the module deasserts
- * its RTS; the reverse direction (module CTS) is module_link.c's GPIO. */
+ * NO hw-flow-control: the nRF's CTS (P1.03) watches the module's RTS, but the
+ * sp1-beacon module app doesn't drive RTS the way feldd's did, so a gated CTS
+ * silently blocked every nRF->module transmit (module booted + sent READY, but
+ * received no commands -> no STATE_ACK, nothing advertised). The download/flash
+ * path already runs flow-control-free and delivers nRF->module bytes reliably;
+ * this low-rate (~1 Hz, 14-byte) command link never risks RX-FIFO overflow, so
+ * dropping flow control is both the proven config and safe. (module CTS on
+ * P1.01 stays module_link.c's GPIO; the module-TX direction is unaffected.) */
 &uart0 {
     compatible = "nordic,nrf-uarte";
     status = "okay";
     current-speed = <115200>;
-    hw-flow-control;
     pinctrl-0 = <&uart0_default>; pinctrl-1 = <&uart0_sleep>; pinctrl-names = "default","sleep";
 };
 
