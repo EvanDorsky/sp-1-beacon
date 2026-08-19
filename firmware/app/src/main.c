@@ -212,10 +212,13 @@ static void boot_signature(void)
 #define KEEPALIVE_MS    1000    /* re-send the unchanged state this often */
 #define SET_STATE_RETRY_MS 50   /* before the module acks, re-send this fast so a
                                  * cold-boot-race SET_STATE isn't lost for ~1 s */
-#define MIN_PRESS_MS    300     /* hold a press in the broadcast at least this long
-                                 * AFTER it first goes on the air, so a short tap
-                                 * (even one released during the module's cold
-                                 * boot) is advertised + caught before its release */
+#define MIN_PRESS_MS    150     /* hold a press in the broadcast at least this long
+                                 * of CONFIRMED on-air time (from the module's ack),
+                                 * so even a tap released during the cold boot is
+                                 * advertised + caught before its release goes out */
+#define MAX_HOLD_MS     700     /* hard cap: never hold a released press longer than
+                                 * this from first broadcast, so a module that stops
+                                 * acking can't wedge the latch (and idle) forever */
 #define BATT_PERIOD_MS  5000    /* battery sample cadence while awake */
 #define FUNC_OFF_TICKS  (5000 / POLL_ON_MS)
 
@@ -233,8 +236,9 @@ static int64_t wake_t, activity_t, last_send_t, last_batt_t;
 /* Per-button press latch: a press is recorded the instant it's detected and held
  * in the broadcast state until it has been on the air for MIN_PRESS_MS, so a tap
  * survives the module's cold boot and reaches the receiver. */
-static bool    vhold[BTN_COUNT];
-static int64_t vhold_t0[BTN_COUNT];    /* uptime the latch first went on air, or -1 */
+static bool    vhold[BTN_COUNT];       /* press latched into the broadcast */
+static int64_t vhold_bc[BTN_COUNT];    /* uptime first broadcast, or -1 (max-hold cap ref) */
+static int64_t vhold_air[BTN_COUNT];   /* uptime the module acked it on air, or -1 */
 
 static void state_send(const struct beacon_state *s, int64_t now)
 {
@@ -244,12 +248,11 @@ static void state_send(const struct beacon_state *s, int64_t now)
     (void)module_link_send(WHCI_FELDD_SET_STATE, payload, BEACON_STATE_LEN);
     last_sent = *s;
     last_send_t = now;
-    /* Stamp when each still-pending press first went on the air, so its release
-     * dwell counts from here — not from the physical press, which may have
-     * happened (and ended) during the module's cold boot. */
+    /* Note when each still-pending press first went out — the max-hold cap
+     * counts from here (the on-air dwell itself counts from the module's ack). */
     for (int i = 0; i < BTN_COUNT; i++) {
-        if ((s->buttons & (uint16_t)(1u << i)) && vhold[i] && vhold_t0[i] < 0) {
-            vhold_t0[i] = now;
+        if ((s->buttons & (uint16_t)(1u << i)) && vhold[i] && vhold_bc[i] < 0) {
+            vhold_bc[i] = now;
         }
     }
 }
@@ -268,7 +271,8 @@ static int scan_controls(void)
             st.buttons |= (uint16_t)(1u << evt[i].idx);
             if (!vhold[evt[i].idx]) {          /* new press: latch it the instant it's detected */
                 vhold[evt[i].idx] = true;
-                vhold_t0[evt[i].idx] = -1;     /* not yet broadcast */
+                vhold_bc[evt[i].idx] = -1;     /* not yet broadcast */
+                vhold_air[evt[i].idx] = -1;    /* not yet acked on air */
             }
         } else {
             st.buttons &= (uint16_t)~(1u << evt[i].idx);   /* physical release; the latch dwell releases it on air */
@@ -298,10 +302,12 @@ static void tx_state(struct beacon_state *out, int64_t now)
             continue;
         }
         bool phys = (st.buttons & (uint16_t)(1u << i)) != 0;
-        if (!phys && vhold_t0[i] >= 0 && now - vhold_t0[i] >= MIN_PRESS_MS) {
-            vhold[i] = false;                  /* released + on air long enough: let go */
+        bool onair_done = vhold_air[i] >= 0 && now - vhold_air[i] >= MIN_PRESS_MS;
+        bool cap_done   = vhold_bc[i]  >= 0 && now - vhold_bc[i]  >= MAX_HOLD_MS;
+        if (!phys && (onair_done || cap_done)) {
+            vhold[i] = false;                  /* released + advertised long enough (or capped) */
         } else {
-            b |= (uint16_t)(1u << i);          /* held, still dwelling, or not yet broadcast */
+            b |= (uint16_t)(1u << i);          /* held, still dwelling, or not yet on air */
         }
     }
     out->buttons = b;
@@ -455,11 +461,21 @@ int main(void)
             if (changed || txs.buttons != 0) {
                 activity_t = now;
             }
+            /* Once the module acks the current state, it's confirmed on the air:
+             * start each still-held press's on-air dwell from now. */
+            bool acked = module_link_last_ack_seq() == (int)seq;
+            if (acked) {
+                for (int i = 0; i < BTN_COUNT; i++) {
+                    if (vhold[i] && vhold_air[i] < 0 &&
+                        (last_sent.buttons & (uint16_t)(1u << i))) {
+                        vhold_air[i] = now;
+                    }
+                }
+            }
             /* Nothing changed: keep (re)sending the current state — fast until
              * the module acks this seq (the first SET_STATE after a cold boot
              * can beat the module's BLE stack up), then slow keepalive. */
             if (!changed) {
-                bool acked = module_link_last_ack_seq() == (int)seq;
                 int64_t due = acked ? KEEPALIVE_MS : SET_STATE_RETRY_MS;
                 if (now - last_send_t >= due) {
                     state_send(&txs, now);
