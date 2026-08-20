@@ -216,14 +216,14 @@ static void boot_signature(void)
 #define KEEPALIVE_MS    1000    /* re-send the unchanged state this often */
 #define SET_STATE_RETRY_MS 50   /* before the module acks, re-send this fast so a
                                  * cold-boot-race SET_STATE isn't lost for ~1 s */
-#define MIN_PRESS_MS    150     /* hold a press in the broadcast at least this long
+#define MIN_PRESS_MS    300     /* hold a press in the broadcast at least this long
                                  * of CONFIRMED on-air time (from the module's ack),
                                  * so even a tap released during the cold boot is
                                  * advertised + caught before its release goes out */
-#define MAX_HOLD_MS     300     /* hard cap: never hold a released press longer than
+#define MAX_HOLD_MS     700     /* hard cap: never hold a released press longer than
                                  * this from first broadcast, so a module that stops
                                  * acking can't wedge the latch (and idle) forever */
-#define BATT_PERIOD_MS  600000  /* battery sample cadence while awake */
+#define GAUGE_BATT_MS   10000   /* charge-gauge battery sample cadence (USB only) */
 #define FUNC_OFF_MS     2000    /* •• held this long powers the device off */
 #define FUNC_TAP_MS     1000    /* •• released before this = a status tap, not a hold */
 
@@ -237,13 +237,14 @@ static enum bc_state bc = BC_IDLE;
 static struct beacon_state st;         /* live control state */
 static struct beacon_state last_sent;  /* what's currently on the air */
 static uint8_t seq;
-static int64_t wake_t, activity_t, last_send_t, last_batt_t;
+static int64_t wake_t, activity_t, last_send_t;
 /* Per-button press latch: a press is recorded the instant it's detected and held
  * in the broadcast state until it has been on the air for MIN_PRESS_MS, so a tap
  * survives the module's cold boot and reaches the receiver. */
 static bool    vhold[BTN_COUNT];       /* press latched into the broadcast */
 static int64_t vhold_bc[BTN_COUNT];    /* uptime first broadcast, or -1 (max-hold cap ref) */
 static int64_t vhold_air[BTN_COUNT];   /* uptime the module acked it on air, or -1 */
+static bool    idle_rail_on;           /* idle rail currently powered (USB: kept on) */
 
 static void state_send(const struct beacon_state *s, int64_t now)
 {
@@ -318,11 +319,26 @@ static void tx_state(struct beacon_state *out, int64_t now)
     out->buttons = b;
 }
 
+/* Record a press the instant the idle scan sees it — from the instantaneous
+ * ladder decode, not the debounced edge — so a short tap that ends before the
+ * debounce commits during the module's cold boot still reaches the receiver.
+ * Sets ONLY the vhold latch; st.buttons stays debounce-driven (a physical hold
+ * makes it phys=true; a released tap rides the latch dwell out). */
+static void instant_latch(int idx)
+{
+    if (idx >= 0 && !vhold[idx]) {
+        vhold[idx] = true;
+        vhold_bc[idx] = -1;
+        vhold_air[idx] = -1;
+    }
+}
+
 static void bc_go_idle(void)
 {
     (void)module_link_adv(false);          /* courtesy; the reset kills it anyway */
     module_link_power(false);
     controls_rail(0);
+    idle_rail_on = false;                  /* rail dropped; next idle scan re-settles */
     led_pin(SP1_LED1, false);
     for (int i = 0; i < BTN_COUNT; i++) {  /* drop any pending press latch */
         vhold[i] = false;
@@ -394,26 +410,44 @@ int main(void)
     last_sent = st;
     int64_t  func_since = -1;   /* uptime •• was first seen held (armed), or -1 */
     int      func_armed = 0;    /* honor •• only after it has read released once */
+    int64_t  gauge_batt_t = -1; /* last charge-gauge battery sample time, or -1 */
+    int      gauge_raw = -1;    /* last battery ADC raw for the gauge */
     bc_go_idle();
 
     for (;;) {
         feed_wdt();
 
-        if (!usb_up && usb_present()) {
+        int usb_now = usb_present();
+        if (!usb_up && usb_now) {
             usb_up = (usbdev_start() == 0);
         }
 
         /* ---- sample the controls (rail handling depends on state) ---- */
         if (bc == BC_IDLE) {
-            controls_rail(1);
-            k_busy_wait(RAIL_SETTLE_US);
+            /* On USB, keep the rail on and scan fast (see the sleep below) so no
+             * press falls in a duty-cycle blind gap; on battery, duty-cycle the
+             * rail for power. Settle only when the rail was just raised. */
+            if (!idle_rail_on) {
+                controls_rail(1);
+                k_busy_wait(RAIL_SETTLE_US);
+                idle_rail_on = true;
+            }
             scan_controls();
             int loaded = buttons_rail_probe();
-            controls_rail(0);
+            int trk_now = -1, vol_now = -1;
+            if (loaded) {
+                buttons_decode_now(&trk_now, &vol_now);   /* capture the button while the rail is on */
+            }
+            if (!usb_now) {
+                controls_rail(0);                          /* battery: drop the rail for power */
+                idle_rail_on = false;
+            }
 
             /* Wake on ANY activity: a (even not-yet-debounced) button on the
              * rail, a committed button, or a fader moved past the deadband. */
             if (loaded || st.buttons != 0) {
+                instant_latch(trk_now);   /* record the press NOW, before the debounce commits */
+                instant_latch(vol_now);
                 bc_wake("button");
             } else if (beacon_state_changed(&last_sent, &st)) {
                 bc_wake("fader");
@@ -430,12 +464,15 @@ int main(void)
                 int64_t now = k_uptime_get();
                 printk("BC: on (module boot %d ms)\n", (int)(now - wake_t));
                 (void)module_link_adv(true);   /* feldd-app compat: presence beacon */
+                int pct = battery_pct(controls_read_raw(6));   /* one battery read per wake */
+                if (pct >= 0) {
+                    st.battery = (uint8_t)pct;
+                }
                 struct beacon_state txs;
                 tx_state(&txs, now);           /* include any press latched during the boot */
                 seq++;
                 state_send(&txs, now);
                 activity_t = now;              /* linger from the first broadcast, not from wake */
-                last_batt_t = 0;               /* force a battery sample soon */
                 bc = BC_ON;
             } else if (k_uptime_get() - wake_t > WAKE_TIMEOUT_MS) {
                 printk("BC: module boot timeout, retrying via idle\n");
@@ -445,13 +482,6 @@ int main(void)
         } else if (bc == BC_ON) {
             int64_t now = k_uptime_get();
 
-            if (now - last_batt_t > BATT_PERIOD_MS) {
-                last_batt_t = now;
-                int pct = battery_pct(controls_read_raw(6));
-                if (pct >= 0) {
-                    st.battery = (uint8_t)pct;
-                }
-            }
             struct beacon_state txs;
             tx_state(&txs, now);               /* st + latched presses (min on-air hold) */
 
@@ -527,7 +557,28 @@ int main(void)
             func_armed = 1;
         }
 
-        k_msleep(bc == BC_IDLE ? POLL_IDLE_MS : POLL_ON_MS);
+        /* Charge gauge on the 4 side LEDs whenever USB is plugged in — a
+         * glanceable charge state while the device is powered on. Battery moves
+         * slowly so it's sampled every GAUGE_BATT_MS; the blink is time-based so
+         * its rate stays steady across the 8/40 ms loop cadence. */
+        if (usb_present()) {
+            int64_t gnow = k_uptime_get();
+            if (gauge_batt_t < 0 || gnow - gauge_batt_t >= GAUGE_BATT_MS) {
+                gauge_batt_t = gnow;
+                gauge_raw = controls_read_raw(6);
+            }
+            charge_gauge(battery_pct(gauge_raw), charging(), (uint32_t)(gnow / 40));
+        } else if (gauge_batt_t >= 0) {
+            for (int i = 0; i < 4; i++) {   /* just unplugged: clear the gauge */
+                led_idx(4 + i, false);
+            }
+            gauge_batt_t = -1;
+            gauge_raw = -1;
+        }
+
+        /* Idle on USB scans as fast as the awake state (rail stays on) so no tap
+         * lands in a blind gap; idle on battery duty-cycles at POLL_IDLE_MS. */
+        k_msleep(bc != BC_IDLE ? POLL_ON_MS : (usb_now ? POLL_ON_MS : POLL_IDLE_MS));
     }
     return 0;
 }
