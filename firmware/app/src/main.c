@@ -171,7 +171,7 @@ static void charge_standby_gate(uint32_t wake_reas)
             led_idx(0, false);
             if (!adc_up) {
                 controls_init();
-                led_set_brightness(LED_BRIGHTNESS_FULL);
+                led_set_brightness(LED_BRIGHTNESS_DEFAULT);
                 last_raw = controls_read_raw(6);      /* battery */
                 adc_up = 1;
             } else if ((tick % 50u) == 0u) {
@@ -207,7 +207,7 @@ static void boot_signature(void)
                                  * ~8 ms scans; at the old 20 ms a press took ~40 ms
                                  * of hold to register and short taps were dropped
                                  * before the press latch ever saw them. */
-#define RAIL_SETTLE_US  500     /* rail-up to first sample. BENCH-TUNE: if idle
+#define RAIL_SETTLE_US  2000     /* rail-up to first sample. BENCH-TUNE: if idle
                                  * scans misread (phantom wakes / missed
                                  * presses), this is the first knob. */
 #define LINGER_MS       5000    /* keep broadcasting this long after the last
@@ -220,12 +220,12 @@ static void boot_signature(void)
                                  * of CONFIRMED on-air time (from the module's ack),
                                  * so even a tap released during the cold boot is
                                  * advertised + caught before its release goes out */
-#define MAX_HOLD_MS     700     /* hard cap: never hold a released press longer than
+#define MAX_HOLD_MS     300     /* hard cap: never hold a released press longer than
                                  * this from first broadcast, so a module that stops
                                  * acking can't wedge the latch (and idle) forever */
-#define BATT_PERIOD_MS  5000    /* battery sample cadence while awake */
-#define FUNC_OFF_MS     5000    /* •• held this long powers the device off */
-#define FUNC_TAP_MS     1250    /* •• released before this = a status tap, not a hold */
+#define BATT_PERIOD_MS  600000  /* battery sample cadence while awake */
+#define FUNC_OFF_MS     2000    /* •• held this long powers the device off */
+#define FUNC_TAP_MS     1000    /* •• released before this = a status tap, not a hold */
 
 enum bc_state { BC_IDLE, BC_WAKE, BC_ON };
 
@@ -526,9 +526,6 @@ int main(void)
             func_since = -1;
             func_armed = 1;
         }
-
-        /* Side LED 4: on while broadcasting. */
-        led_pin(SP1_LED1, bc == BC_ON);
 
         k_msleep(bc == BC_IDLE ? POLL_IDLE_MS : POLL_ON_MS);
     }

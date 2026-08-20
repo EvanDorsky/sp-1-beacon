@@ -18,7 +18,7 @@
  * "on"  drives the channel at the current brightness; "off" drives duty 0.
  */
 #define LED_COUNT              8
-#define LED_BRIGHTNESS_DEFAULT 50   /* percent — "half brightness" per the field request */
+#define LED_BRIGHTNESS_DEFAULT 10
 #define LED_BRIGHTNESS_FULL    100  /* boot parade + any deliberately full-bright cue    */
 
 /* Bring up all 8 PWM channels (call once at boot before any led_* drive). Returns
