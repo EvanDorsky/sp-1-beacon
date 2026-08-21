@@ -4,8 +4,8 @@
  * The SP-1 spends its life in a low-power idle: the CYW20706 radio held in
  * reset, LEDs dark, and a slow scan (~every 40 ms on battery; continuous on
  * USB) of the button ladders. A button press wakes the radio; the debounced
- * press is classified into a BTHome v2 EVENT (tap -> press on release, hold
- * -> long_press at the threshold), queued, and broadcast as BTHome service
+ * press is classified into a BTHome v2 EVENT (press instantly at the down
+ * edge; long_press additionally at the threshold), queued, and broadcast as
  * data (bthome.h, bluetooth/broadcast-format.md) that Home Assistant decodes
  * natively. Each event gets its own packet id and is held on the air for an
  * acked dwell so a duty-cycled receiver catches it; keepalives repeat the

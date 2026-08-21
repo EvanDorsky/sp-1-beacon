@@ -23,9 +23,12 @@
  * Button order = the buttons.h logical indices (Play, T1..T4, Vol+, Vol-,
  * FWD, RWD) -> HA button_1..button_9.
  *
- * Events, not state bits: a tap emits `press` on release; a hold emits
- * `long_press` once at the threshold (its release then emits nothing). The
- * classifier here is pure (host-tested in firmware/test/test_bthome.c).
+ * Events, not state bits: every press emits `press` IMMEDIATELY at the
+ * (debounced) down edge — latency beats long-press disambiguation — and a
+ * hold additionally emits `long_press` once at the threshold; releases emit
+ * nothing. So a long hold fires press then long_press: bind them to
+ * non-conflicting actions per button. The classifier is pure (host-tested in
+ * firmware/test/test_bthome.c).
  */
 #include <stdint.h>
 #include <stddef.h>
@@ -66,8 +69,8 @@ struct bthome_clf {
 
 void bthome_clf_init(struct bthome_clf *c);
 
-/* Feed one debounced edge. Returns the event to emit NOW (a release before the
- * long threshold -> BTHOME_EV_PRESS) or BTHOME_EV_NONE. */
+/* Feed one debounced edge. A press-down edge returns BTHOME_EV_PRESS (emitted
+ * instantly); releases return BTHOME_EV_NONE. */
 uint8_t bthome_clf_edge(struct bthome_clf *c, int idx, bool pressed, int64_t now);
 
 /* Per-tick: returns BTHOME_EV_LONG_PRESS exactly once when a held button

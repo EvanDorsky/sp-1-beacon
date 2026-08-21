@@ -53,15 +53,19 @@ count and order must never change between packets.
 | Value | Event | SP-1 gesture |
 |---|---|---|
 | `0x00` | none | (placeholder — keeps positional numbering) |
-| `0x01` | press | tap (released before the long threshold) |
-| `0x04` | long_press | held ≥ ~1 s |
+| `0x01` | press | EVERY press, emitted instantly at the down edge |
+| `0x04` | long_press | additionally, once the hold crosses ~1 s |
 | `0x02` | double_press | *(not emitted initially — see plan)* |
+
+> `press` fires at press-DOWN — latency beats long-press disambiguation — so a
+> long hold emits `press` and then `long_press`. Bind them to non-conflicting
+> actions on any button that uses both.
 
 ## Event semantics (vs. the old state bits)
 
 The legacy format broadcast **held-state bits**; BTHome broadcasts **events**.
-The nRF classifies each debounced press into an event on release (tap →
-`press`) or at the hold threshold (`long_press`), then:
+The nRF classifies each debounced press: `press` at the down edge, plus
+`long_press` at the hold threshold. For each event it then:
 
 1. bumps the **packet id**,
 2. composes the packet with that button's event value (others `0x00`),

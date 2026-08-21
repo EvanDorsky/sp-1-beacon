@@ -41,17 +41,18 @@ uint8_t bthome_clf_edge(struct bthome_clf *c, int idx, bool pressed, int64_t now
         return BTHOME_EV_NONE;
     }
     if (pressed) {
+        /* press fires IMMEDIATELY at press-down (latency matters more than
+         * suppressing it under a long hold: a hold emits press THEN long_press,
+         * so don't bind conflicting actions to both on one button). */
         c->down_t[idx] = now;
         c->long_sent[idx] = false;
-        return BTHOME_EV_NONE;
+        return BTHOME_EV_PRESS;
     }
-    /* Release: a short hold is a press; a long hold already emitted its
-     * long_press at the threshold, so its release emits nothing. */
-    bool was_down = c->down_t[idx] >= 0;
-    bool already_long = c->long_sent[idx];
+    /* Release emits nothing: press already went out at the down edge and
+     * long_press (if any) at its threshold. */
     c->down_t[idx] = -1;
     c->long_sent[idx] = false;
-    return (was_down && !already_long) ? BTHOME_EV_PRESS : BTHOME_EV_NONE;
+    return BTHOME_EV_NONE;
 }
 
 uint8_t bthome_clf_poll(struct bthome_clf *c, int idx, int64_t now)
