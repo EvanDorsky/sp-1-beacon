@@ -91,7 +91,7 @@ There is no room for the four fader values alongside nine button objects.
 When wanted, they go in a **second, alternating packet** (same device, its own
 packet ids) using a small numeric object per fader — candidate object ids to
 be verified against the BTHome table at implementation time. Until then,
-faders wake the device (unchanged) but are not broadcast.
+faders are read (and rail-frozen) but neither broadcast nor wake the device.
 
 ## Encryption (phase 3, optional)
 

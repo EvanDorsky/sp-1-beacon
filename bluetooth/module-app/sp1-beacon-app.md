@@ -24,14 +24,14 @@ WICED-HCI over the module UART, private command group `0xF0` (opcode =
 |------|---------|---------|----------|
 | 0x03 | PING | — | reply with the READY event |
 | 0x04 | ADV | 1 byte: 0/1 | stop / start non-connectable advertising |
-| 0x10 | SET_STATE | 9 bytes (`beacon_state.h` format) | embed the payload as manufacturer data, (re)start advertising if stopped, ack with STATE_ACK |
+| 0x10 | SET_STATE | 1..24 bytes: raw BTHome v2 service-data payload (`bthome.h`: devinfo + objects) | wrap verbatim in a Service Data `0xFCD2` AD element, (re)start advertising if stopped, ack with STATE_ACK |
 
 Events to the nRF:
 
 | Code | Event | Payload | When |
 |------|-------|---------|------|
-| 0x80 | READY | 1 byte: expected state length (9) | at boot (stack up), on transport-up, and in reply to PING |
-| 0x81 | STATE_ACK | 1 byte: the applied payload's seq | after each accepted SET_STATE |
+| 0x80 | READY | 1 byte: max SET_STATE payload (24) | at boot (stack up), on transport-up, and in reply to PING |
+| 0x81 | STATE_ACK | 1 byte: the BTHome packet id (payload[2]) | after each accepted SET_STATE |
 
 Command codes 0x03/0x04 deliberately match feldd's app (PING/ADV), so the nRF
 firmware's M2-era plumbing drives either app; feldd's MIDI/HID codes are
@@ -44,12 +44,13 @@ A legacy non-connectable advertisement (`BTM_BLE_ADVERT_NONCONN_HIGH`,
 the module's **stable factory BD_ADDR** (privacy/RPA off) so receivers can
 filter on the address. AD structure:
 
-- **Flags**: BR/EDR-not-supported only.
-- **Manufacturer Specific Data**: company ID `0xFFFF` (Bluetooth SIG
-  internal-use), then the 9 `beacon_state` bytes verbatim
-  (version, seq, buttons u16 LE, 4× fader u8, battery pct).
+- **Flags**: LE General Discoverable + BR/EDR-not-supported (`0x06` — BTHome
+  receivers/BlueZ need it).
+- **Service Data, 16-bit UUID `0xFCD2` (BTHome v2)**: the SET_STATE payload
+  verbatim (devinfo + objects — the app is format-dumb; the nRF composes it,
+  spec in `bluetooth/broadcast-format.md`).
 
-`scripts/e2e_monitor.py` decodes exactly this.
+`scripts/e2e_monitor.py` and Home Assistant's `bthome` integration decode this.
 
 ## The modifications to hello_sensor, in prose
 
@@ -60,8 +61,8 @@ filter on the address. AD structure:
    owns advertising lifetime; without this the stack silently stops
    advertising after 30 s.
 2. **`hello_sensor.c`** — add one self-contained block: the 0xF0 opcode
-   defines, a static `[company LE16][9-byte state]` manufacturer-data buffer,
-   an adv builder (Flags + manufacturer data via
+   defines, a static `[UUID 0xFCD2 LE16][≤24-byte payload]` service-data
+   buffer, an adv builder (Flags + `BTM_BLE_ADVERT_TYPE_SERVICE_DATA` via
    `wiced_bt_ble_set_raw_advertisement_data`), start/stop via
    `wiced_bt_start_advertisements(BTM_BLE_ADVERT_NONCONN_HIGH / _OFF)`, the
    RX handler (frame layout `[opcode LE16][len LE16][payload]`; **free the
