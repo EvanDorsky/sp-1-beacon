@@ -282,21 +282,4 @@ int buttons_track_committed(void)
 {
     return g_state.trk.committed;
 }
-
-/* Instantaneous decode of both ladders, pre-debounce (see buttons.h). Reuses the
- * pure decoders + the DFU-band gate so it agrees with buttons_scan's mapping. */
-void buttons_decode_now(int *trk_idx, int *vol_idx)
-{
-    int trk_raw = controls_read_raw(0);
-    int vol_raw = controls_read_raw(1);
-    if (trk_raw < 0) trk_raw = 0;
-    if (vol_raw < 0) vol_raw = 0;
-    if (trk_idx) {
-        *trk_idx = buttons_in_dfu_band_pure(trk_raw)
-                       ? -1 : buttons_decode_tracks_pure(trk_raw);
-    }
-    if (vol_idx) {
-        *vol_idx = buttons_decode_vol_pure(vol_raw);
-    }
-}
 #endif /* BUTTONS_HOST_TEST */

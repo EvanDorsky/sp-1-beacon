@@ -30,10 +30,4 @@ int  buttons_rail_probe(void);
    1..4 = Track1..4. Drives the track-LED button-press feedback (light track LED
    N while its Track button is held). */
 int  buttons_track_committed(void);
-/* Instantaneous per-ladder button decode (pre-debounce), read NOW. For the idle
-   press-latch: capture which button is down the moment the rail-probe sees a
-   load, so a tap that ends before the 3-read debounce commits is still recorded.
-   Each out is a logical index or -1 (none); the Track1+4 DFU band reads as -1 on
-   tracks (matches buttons_scan). Valid only while the rail is powered. */
-void buttons_decode_now(int *trk_idx, int *vol_idx);
 #endif

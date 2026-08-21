@@ -212,15 +212,17 @@ static void boot_signature(void)
                                  * presses), this is the first knob. */
 #define LINGER_MS       5000    /* keep broadcasting this long after the last
                                  * activity before going back to sleep */
-#define WAKE_TIMEOUT_MS 3000    /* module boot watchdog: give up and retry */
+#define WAKE_TIMEOUT_MS 5000    /* module boot watchdog: give up and retry */
 #define KEEPALIVE_MS    1000    /* re-send the unchanged state this often */
 #define SET_STATE_RETRY_MS 50   /* before the module acks, re-send this fast so a
                                  * cold-boot-race SET_STATE isn't lost for ~1 s */
-#define MIN_PRESS_MS    300     /* hold a press in the broadcast at least this long
+#define MIN_PRESS_MS    600     /* hold a press in the broadcast at least this long
                                  * of CONFIRMED on-air time (from the module's ack),
                                  * so even a tap released during the cold boot is
-                                 * advertised + caught before its release goes out */
-#define MAX_HOLD_MS     700     /* hard cap: never hold a released press longer than
+                                 * advertised + caught before its release goes out
+                                 * (600 ms rides out receiver WiFi-coex scan gaps;
+                                 * bench-tested) */
+#define MAX_HOLD_MS     1000    /* hard cap: never hold a released press longer than
                                  * this from first broadcast, so a module that stops
                                  * acking can't wedge the latch (and idle) forever */
 #define GAUGE_BATT_MS   10000   /* charge-gauge battery sample cadence (USB only) */
@@ -317,20 +319,6 @@ static void tx_state(struct beacon_state *out, int64_t now)
         }
     }
     out->buttons = b;
-}
-
-/* Record a press the instant the idle scan sees it — from the instantaneous
- * ladder decode, not the debounced edge — so a short tap that ends before the
- * debounce commits during the module's cold boot still reaches the receiver.
- * Sets ONLY the vhold latch; st.buttons stays debounce-driven (a physical hold
- * makes it phys=true; a released tap rides the latch dwell out). */
-static void instant_latch(int idx)
-{
-    if (idx >= 0 && !vhold[idx]) {
-        vhold[idx] = true;
-        vhold_bc[idx] = -1;
-        vhold_air[idx] = -1;
-    }
 }
 
 static void bc_go_idle(void)
@@ -434,20 +422,17 @@ int main(void)
             }
             scan_controls();
             int loaded = buttons_rail_probe();
-            int trk_now = -1, vol_now = -1;
-            if (loaded) {
-                buttons_decode_now(&trk_now, &vol_now);   /* capture the button while the rail is on */
-            }
             if (!usb_now) {
                 controls_rail(0);                          /* battery: drop the rail for power */
                 idle_rail_on = false;
             }
 
             /* Wake on ANY activity: a (even not-yet-debounced) button on the
-             * rail, a committed button, or a fader moved past the deadband. */
+             * rail, a committed button, or a fader moved past the deadband. The
+             * SPECIFIC button is left to the debounced scan during the module's
+             * boot (~24 ms commit at the 8 ms cadence) — a single instantaneous
+             * decode here sampled mid-bounce could latch the wrong button. */
             if (loaded || st.buttons != 0) {
-                instant_latch(trk_now);   /* record the press NOW, before the debounce commits */
-                instant_latch(vol_now);
                 bc_wake("button");
             } else if (beacon_state_changed(&last_sent, &st)) {
                 bc_wake("fader");
