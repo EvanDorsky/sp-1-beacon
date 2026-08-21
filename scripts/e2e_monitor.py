@@ -3,24 +3,22 @@
 # requires-python = ">=3.10"
 # dependencies = ["bleak"]
 # ///
-"""e2e_monitor.py — over-the-air E2E monitor for the SP-1 beacon firmware.
+"""e2e_monitor.py — over-the-air E2E monitor for the SP-1 BTHome beacon.
 
-Scans for the SP-1's BLE advertisements (the CYW20706 module's broadcast) and
-prints one line per advertising BURST, so the whole chain is proven end to end:
+Scans for the SP-1's BTHome v2 advertisements (the CYW20706 module's Service
+Data under UUID 0xFCD2 — the same bytes Home Assistant decodes) and prints one
+line per advertising BURST plus each button EVENT, proving the chain:
 
   button press -> nRF -> WICED-HCI -> module -> RADIO -> this machine
 
-Press any SP-1 button except Vol-/RWD and a ~2 s burst should appear here.
+Press any SP-1 button and a burst with a press/long_press event should appear.
 No pairing needed — advertising packets are broadcast; any listener sees them.
-
-The module (still running feldd's BLE app) advertises as "feldd": an HID
-service (0x1812) in the primary AD and the BLE-MIDI service + name in the scan
-response. We match on the name and/or the distinctive BLE-MIDI UUID.
+Wire format: bluetooth/broadcast-format.md (devinfo + pid + battery + 9
+positional button-event objects).
 
 Usage:
   uv run scripts/e2e_monitor.py          # uv installs bleak automatically
   uv run scripts/e2e_monitor.py --any    # print every BLE sighting (debug)
-  scripts/e2e_monitor.py --name NAME     # plain python3 (needs: pip3 install bleak)
 
 macOS: grant your terminal Bluetooth permission (System Settings > Privacy).
 """
@@ -34,26 +32,41 @@ try:
 except ImportError:
     sys.exit("bleak is required:  pip3 install bleak")
 
-BLE_MIDI_UUID = "03b80e5a-ede8-4b33-a751-6ce34ec4c700"
+# BTHome v2 service data UUID (bleak keys service_data by the 128-bit form).
+BTHOME_UUID_128 = "0000fcd2-0000-1000-8000-00805f9b34fb"
 
-# The sp1-beacon module app (M3b+) broadcasts manufacturer data instead:
-# company 0xFFFF (SIG internal-use), then the 9-byte beacon_state payload
-# (version, seq, buttons u16 LE, 4x fader u8, battery). Decode it live.
-SP1_COMPANY_ID = 0xFFFF
-SP1_STATE_VER = 1
 BTN_NAMES = ["PLAY", "T1", "T2", "T3", "T4", "VOL+", "VOL-", "FWD", "RWD"]
+EV_NAMES = {0x01: "press", 0x02: "double", 0x03: "triple",
+            0x04: "long_press", 0x05: "long_double", 0x06: "long_triple",
+            0x80: "hold"}
 
 
-def decode_state(mfr: dict):
-    payload = mfr.get(SP1_COMPANY_ID)
-    if not payload or len(payload) < 9 or payload[0] != SP1_STATE_VER:
+def decode_state(svc: dict):
+    """Decode a BTHome v2 payload -> summary string, or None if not the SP-1."""
+    payload = svc.get(BTHOME_UUID_128)
+    if not payload or len(payload) < 3:
         return None
-    buttons = payload[2] | (payload[3] << 8)
-    held = [BTN_NAMES[i] for i in range(9) if buttons & (1 << i)] or ["-"]
-    batt = payload[8]
-    return (f"seq={payload[1]} btn={'+'.join(held)} "
-            f"faders={payload[4]}/{payload[5]}/{payload[6]}/{payload[7]} "
-            f"batt={'?' if batt == 0xFF else batt}")
+    if (payload[0] >> 5) != 2:            # BTHome version bits
+        return None
+    pid = batt = None
+    events = []
+    i, btn = 1, 0
+    while i + 1 < len(payload) + 1 and i < len(payload):
+        obj = payload[i]
+        if obj == 0x00 and i + 1 < len(payload):        # packet id
+            pid = payload[i + 1]; i += 2
+        elif obj == 0x01 and i + 1 < len(payload):      # battery %
+            batt = payload[i + 1]; i += 2
+        elif obj == 0x3A and i + 1 < len(payload):      # button event
+            ev = payload[i + 1]
+            if ev != 0x00:
+                name = BTN_NAMES[btn] if btn < len(BTN_NAMES) else f"btn{btn + 1}"
+                events.append(f"{name}:{EV_NAMES.get(ev, hex(ev))}")
+            btn += 1; i += 2
+        else:
+            break                                        # unknown object: stop
+    return (f"pid={pid} ev={'+'.join(events) if events else '-'} "
+            f"batt={'?' if batt is None else batt}")
 
 # A gap this long with no sighting ends the burst. The firmware's burst is ~2 s
 # of advertising at a fast interval, so intra-burst gaps stay well under this.
@@ -76,12 +89,10 @@ class BurstWatch:
         self.last_state = None      # decoded sp1 state, printed on change
 
     def matches(self, device, adv) -> bool:
-        if decode_state(adv.manufacturer_data or {}) is not None:
-            return True                       # sp1-beacon state broadcast
+        if decode_state(adv.service_data or {}) is not None:
+            return True                       # sp1 BTHome broadcast
         local = (adv.local_name or device.name or "").lower()
-        if local == self.name:
-            return True                       # feldd-era presence beacon
-        return any(u.lower() == BLE_MIDI_UUID for u in (adv.service_uuids or []))
+        return local == self.name             # legacy fallback (pre-BTHome builds)
 
     def on_detect(self, device, adv) -> None:
         now = time.monotonic()
@@ -91,7 +102,7 @@ class BurstWatch:
         if not self.matches(device, adv):
             return
         self.last_rssi = adv.rssi
-        state = decode_state(adv.manufacturer_data or {})
+        state = decode_state(adv.service_data or {})
         if self.burst_start is None:
             self.bursts += 1
             self.sightings = 0
