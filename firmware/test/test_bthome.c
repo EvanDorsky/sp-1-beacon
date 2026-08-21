@@ -50,6 +50,28 @@ static void test_encode_clamps_and_caps(void)
     CHECK(bthome_encode(0, 50, NULL, out, sizeof(out)) == -1, "NULL ev refused");
 }
 
+static void test_encode_faders(void)
+{
+    uint8_t f[BTHOME_FADER_COUNT] = { 0, 128, 255, 7 };
+    uint8_t out[BTHOME_MAX_PAYLOAD];
+    int n = bthome_encode_faders(9, 55, f, out, sizeof(out));
+
+    CHECK(n == BTHOME_FADER_PAYLOAD, "fader payload length 13");
+    CHECK(out[0] == 0x44, "devinfo");
+    CHECK(out[1] == 0x00 && out[2] == 9, "pid object");
+    CHECK(out[3] == 0x01 && out[4] == 55, "battery object");
+    for (int i = 0; i < BTHOME_FADER_COUNT; i++) {
+        CHECK(out[5 + 2 * i] == 0x09, "count object id");
+        CHECK(out[6 + 2 * i] == f[i], "count value");
+    }
+    CHECK(3 + 2 + 2 + n <= 31, "fader packet fits a legacy advertisement");
+
+    n = bthome_encode_faders(9, BTHOME_BATT_UNKNOWN, f, out, sizeof(out));
+    CHECK(n == BTHOME_FADER_PAYLOAD - 2 && out[3] == 0x09,
+          "battery omitted while unknown");
+    CHECK(bthome_encode_faders(9, 55, f, out, 5) == -1, "small cap refused");
+}
+
 static void test_classifier_tap(void)
 {
     struct bthome_clf c;
@@ -96,6 +118,7 @@ int main(void)
     test_encode_full();
     test_encode_no_battery();
     test_encode_clamps_and_caps();
+    test_encode_faders();
     test_classifier_tap();
     test_classifier_long();
     test_classifier_independent_buttons();

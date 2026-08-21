@@ -39,6 +39,7 @@
 
 #define BTHOME_OBJ_PID    0x00
 #define BTHOME_OBJ_BATT   0x01
+#define BTHOME_OBJ_COUNT  0x09     /* u8 dimensionless counter: fader value 0..255 */
 #define BTHOME_OBJ_BUTTON 0x3A
 
 #define BTHOME_EV_NONE       0x00
@@ -51,15 +52,29 @@
 /* devinfo + pid + battery + 9 buttons (largest possible payload) */
 #define BTHOME_MAX_PAYLOAD (1 + 2 + 2 + 2 * BTHOME_BTN_COUNT)
 
+/* The SP-1's faders go in a SECOND, alternating packet type (no room next to
+ * nine button objects): devinfo + pid + battery + 4x count-u8, positional ->
+ * HA sensors count / count_2..count_4. Same-order rule as the buttons. */
+#define BTHOME_FADER_COUNT 4
+#define BTHOME_FADER_PAYLOAD (1 + 2 + 2 + 2 * BTHOME_FADER_COUNT)
+/* A fader move below this (0..255 scale) is ADC noise, not a gesture. */
+#define BTHOME_FADER_DEADBAND 3
+
 /* A press held at least this long is a long_press (emitted AT the threshold);
  * anything shorter is a press (emitted at release). */
 #define BTHOME_LONG_MS 1000
 
-/* Compose the service-data payload (devinfo + objects). ev is the 9 per-button
+/* Compose the button-packet payload (devinfo + objects). ev is the 9 per-button
  * event values (BTHOME_EV_*); battery 0..100 or BTHOME_BATT_UNKNOWN to omit.
  * Returns the payload length, or -1 if it doesn't fit in cap. */
 int bthome_encode(uint8_t pid, uint8_t battery,
                   const uint8_t ev[BTHOME_BTN_COUNT], uint8_t *out, size_t cap);
+
+/* Compose the fader-packet payload: devinfo + pid + battery + 4x count-u8.
+ * Same battery/return conventions as bthome_encode. */
+int bthome_encode_faders(uint8_t pid, uint8_t battery,
+                         const uint8_t fader[BTHOME_FADER_COUNT],
+                         uint8_t *out, size_t cap);
 
 /* ---- press/long-press classifier (pure; drive from the debounced scan) ---- */
 struct bthome_clf {

@@ -27,6 +27,32 @@ int bthome_encode(uint8_t pid, uint8_t battery,
     return (int)n;
 }
 
+int bthome_encode_faders(uint8_t pid, uint8_t battery,
+                         const uint8_t fader[BTHOME_FADER_COUNT],
+                         uint8_t *out, size_t cap)
+{
+    size_t need = 1 + 2 + 2 * BTHOME_FADER_COUNT +
+                  (battery != BTHOME_BATT_UNKNOWN ? 2 : 0);
+
+    if (out == NULL || fader == NULL || cap < need) {
+        return -1;
+    }
+
+    size_t n = 0;
+    out[n++] = BTHOME_DEVINFO;
+    out[n++] = BTHOME_OBJ_PID;
+    out[n++] = pid;
+    if (battery != BTHOME_BATT_UNKNOWN) {
+        out[n++] = BTHOME_OBJ_BATT;
+        out[n++] = battery > 100 ? 100 : battery;
+    }
+    for (int i = 0; i < BTHOME_FADER_COUNT; i++) {
+        out[n++] = BTHOME_OBJ_COUNT;
+        out[n++] = fader[i];
+    }
+    return (int)n;
+}
+
 void bthome_clf_init(struct bthome_clf *c)
 {
     for (int i = 0; i < BTHOME_BTN_COUNT; i++) {

@@ -89,13 +89,33 @@ missed release can no longer un-press anything.
 - No local name is advertised (no room in the 31-byte packet; HA identifies by
   MAC). Rename the device in HA.
 
-## Faders (phase 2, not in the current packet)
+## Faders — a second packet type
 
-There is no room for the four fader values alongside nine button objects.
-When wanted, they go in a **second, alternating packet** (same device, its own
-packet ids) using a small numeric object per fader — candidate object ids to
-be verified against the BTHome table at implementation time. Until then,
-faders are read (and rail-frozen) but neither broadcast nor wake the device.
+There is no room for the four fader values alongside nine button objects, so
+faders get their **own packet** on the same device (each packet drawing from
+the one shared packet-id sequence):
+
+```
+02 01 06                          Flags
+0F 16 D2 FC 44 00 <pid> 01 <batt> 09 <f1> 09 <f2> 09 <f3> 09 <f4>
+```
+
+Objects in id order: pid `0x00`, battery `0x01`, then **4× count-u8 (`0x09`)**
+— a dimensionless 0–255 counter, exactly the fader range, positional like the
+buttons (HA sensors `count`, `count_2`…`count_4`; rename to Fader 1–4). 20 of
+31 bytes.
+
+Behavior: a fader moved past the deadband (±3) wakes the device / marks it
+dirty; while awake, fader packets stream at most every 200 ms with the latest
+values, and **button events always take priority** (a fader update waits out
+an event's dwell, never the other way round). Fader values freeze at last-good
+while any button is held (rail-sag hardware constraint) and resume on release.
+Receivers process each packet type independently — button entities update from
+button packets, fader sensors from fader packets, dedup by pid as usual.
+
+Binding brightness in HA is one automation: trigger on the fader sensor's
+state change, action `light.turn_on` with
+`brightness: {{ states('sensor.<fader>') | int }}` — 0–255 maps 1:1.
 
 ## Encryption (phase 3, optional)
 

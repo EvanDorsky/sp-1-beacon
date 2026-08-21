@@ -50,6 +50,7 @@ def decode_state(svc: dict):
         return None
     pid = batt = None
     events = []
+    faders = []
     i, btn = 1, 0
     while i + 1 < len(payload) + 1 and i < len(payload):
         obj = payload[i]
@@ -57,6 +58,8 @@ def decode_state(svc: dict):
             pid = payload[i + 1]; i += 2
         elif obj == 0x01 and i + 1 < len(payload):      # battery %
             batt = payload[i + 1]; i += 2
+        elif obj == 0x09 and i + 1 < len(payload):      # count u8: a fader value
+            faders.append(payload[i + 1]); i += 2
         elif obj == 0x3A and i + 1 < len(payload):      # button event
             ev = payload[i + 1]
             if ev != 0x00:
@@ -65,8 +68,9 @@ def decode_state(svc: dict):
             btn += 1; i += 2
         else:
             break                                        # unknown object: stop
-    return (f"pid={pid} ev={'+'.join(events) if events else '-'} "
-            f"batt={'?' if batt is None else batt}")
+    body = (f"faders={'/'.join(map(str, faders))}" if faders
+            else f"ev={'+'.join(events) if events else '-'}")
+    return f"pid={pid} {body} batt={'?' if batt is None else batt}"
 
 # A gap this long with no sighting ends the burst. The firmware's burst is ~2 s
 # of advertising at a fast interval, so intra-burst gaps stay well under this.

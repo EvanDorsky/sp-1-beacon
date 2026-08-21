@@ -218,6 +218,8 @@ static void boot_signature(void)
                                  * receiver's WiFi-coex scan gaps (bench-tested) */
 #define EVENT_CAP_MS    1000    /* hard cap from first send: a module that stops
                                  * acking can't wedge the event queue forever */
+#define FADER_MIN_MS    200     /* min gap between fader packets: sliding streams
+                                 * ~5 updates/s; button events always take priority */
 #define GAUGE_BATT_MS   10000   /* charge-gauge battery sample cadence (USB only) */
 #define FUNC_OFF_MS     2000    /* •• held this long powers the device off */
 #define FUNC_TAP_MS     1000    /* •• released before this = a status tap, not a hold */
@@ -230,7 +232,9 @@ static const char *const btn_name[BTN_COUNT] = {
 
 static enum bc_state bc = BC_IDLE;
 static struct bthome_clf clf;          /* debounced edges -> press/long_press events */
-static uint8_t fader[4];               /* read + rail-freeze as before; phase 2 broadcasts them */
+static uint8_t fader[4];               /* live fader values (rail-frozen while a button sags it) */
+static uint8_t last_bcast_fader[4];    /* what's been broadcast; dirty = moved past the deadband */
+static bool    fader_seeded;           /* first clean read seeds the baseline, no phantom wake */
 static uint8_t battery = BTHOME_BATT_UNKNOWN;
 static uint8_t pid;                    /* BTHome packet id: bumps per EVENT, survives sleeps */
 static int64_t wake_t, activity_t, last_send_t;
@@ -266,10 +270,13 @@ static bool evq_pop(uint8_t *btn, uint8_t *ev)
     return true;
 }
 
-/* The current on-air packet: its per-button event values (content for the
- * current pid — NEVER changed without bumping pid, so receivers that dedup on
- * pid can't see two contents under one id). */
+/* The current on-air packet: kind + content for the current pid — content is
+ * NEVER changed without bumping pid, so receivers that dedup on pid can't see
+ * two contents under one id. */
+enum pkt_kind { PKT_BUTTONS, PKT_FADERS };
+static enum pkt_kind cur_kind = PKT_BUTTONS;
 static uint8_t cur_ev[BTHOME_BTN_COUNT];
+static uint8_t cur_fader[4];           /* snapshot broadcast in a PKT_FADERS packet */
 static bool    cur_has_event;
 static int64_t pkt_send_t;             /* first send of the current pid */
 static int64_t pkt_air_t;              /* first ack of the current pid, -1 = not yet */
@@ -277,7 +284,9 @@ static int64_t pkt_air_t;              /* first ack of the current pid, -1 = not
 static void payload_send(int64_t now)
 {
     uint8_t p[BTHOME_MAX_PAYLOAD];
-    int n = bthome_encode(pid, battery, cur_ev, p, sizeof(p));
+    int n = (cur_kind == PKT_FADERS)
+                ? bthome_encode_faders(pid, battery, cur_fader, p, sizeof(p))
+                : bthome_encode(pid, battery, cur_ev, p, sizeof(p));
 
     if (n > 0) {
         (void)module_link_send(WHCI_FELDD_SET_STATE, p, (uint16_t)n);
@@ -285,9 +294,10 @@ static void payload_send(int64_t now)
     last_send_t = now;
 }
 
-/* Start a new packet: bump pid, set the content (btn < 0 = all-none), send. */
+/* Start a new button packet: bump pid, set the content (btn < 0 = all-none), send. */
 static void packet_new(int btn, uint8_t ev, int64_t now)
 {
+    cur_kind = PKT_BUTTONS;
     for (int i = 0; i < BTHOME_BTN_COUNT; i++) {
         cur_ev[i] = BTHOME_EV_NONE;
     }
@@ -302,6 +312,37 @@ static void packet_new(int btn, uint8_t ev, int64_t now)
     pkt_send_t = now;
     pkt_air_t = -1;
     payload_send(now);
+}
+
+/* Start a new fader packet: snapshot the live values as the broadcast baseline. */
+static void packet_new_faders(int64_t now)
+{
+    cur_kind = PKT_FADERS;
+    cur_has_event = false;
+    for (int i = 0; i < 4; i++) {
+        cur_fader[i] = fader[i];
+        last_bcast_fader[i] = fader[i];
+    }
+    pid++;
+    pkt_send_t = now;
+    pkt_air_t = -1;
+    payload_send(now);
+}
+
+/* True once any fader has moved past the deadband vs. what's been broadcast. */
+static bool fader_dirty(void)
+{
+    if (!fader_seeded) {
+        return false;
+    }
+    for (int i = 0; i < 4; i++) {
+        int d = (int)fader[i] - (int)last_bcast_fader[i];
+        if (d < 0) d = -d;
+        if (d > BTHOME_FADER_DEADBAND) {
+            return true;
+        }
+    }
+    return false;
 }
 
 /* True while any button is (debounced-)down. */
@@ -346,6 +387,12 @@ static int scan_controls(void)
             if (raw >= 0) {
                 fader[i] = (uint8_t)(raw >> 4);
             }
+        }
+        if (!fader_seeded) {               /* first clean read: baseline, not a gesture */
+            for (int i = 0; i < 4; i++) {
+                last_bcast_fader[i] = fader[i];
+            }
+            fader_seeded = true;
         }
     }
     return n;
@@ -454,13 +501,14 @@ int main(void)
                 idle_rail_on = false;
             }
 
-            /* Wake on a button: a (even not-yet-debounced) press on the rail or
-             * a committed button. The SPECIFIC button is left to the debounced
-             * scan during the module's boot (~24 ms commit at the 8 ms cadence).
-             * Fader moves no longer wake — phase 1 BTHome broadcasts only
-             * button events (bluetooth/broadcast-format.md). */
+            /* Wake on a button (even a not-yet-debounced press on the rail; the
+             * SPECIFIC button is left to the debounced scan during the module's
+             * boot) — or on a fader moved past the deadband, which gets its own
+             * fader packet once the module is up. */
             if (loaded || any_down() || evq_len > 0) {
                 bc_wake("button");
+            } else if (fader_dirty()) {
+                bc_wake("fader");
             }
         } else {
             scan_controls();
@@ -479,10 +527,13 @@ int main(void)
                     battery = (uint8_t)pct;
                 }
                 /* First packet of the session: the first queued event if one
-                 * already landed during the boot, else an all-none baseline. */
+                 * already landed during the boot, else the fader update that
+                 * woke us, else an all-none baseline. */
                 uint8_t btn, ev;
                 if (evq_pop(&btn, &ev)) {
                     packet_new(btn, ev, now);
+                } else if (fader_dirty()) {
+                    packet_new_faders(now);
                 } else {
                     packet_new(-1, BTHOME_EV_NONE, now);
                 }
@@ -512,6 +563,10 @@ int main(void)
             uint8_t btn, ev;
             if (dwell_done && evq_pop(&btn, &ev)) {
                 packet_new(btn, ev, now);      /* next event -> new pid */
+                activity_t = now;
+            } else if (dwell_done && evq_len == 0 && fader_dirty() &&
+                       now - pkt_send_t >= FADER_MIN_MS) {
+                packet_new_faders(now);        /* fader update; events always preempt */
                 activity_t = now;
             } else if (now - last_send_t >= (acked ? KEEPALIVE_MS : SEND_RETRY_MS)) {
                 payload_send(now);             /* same pid + content: retry/keepalive */
