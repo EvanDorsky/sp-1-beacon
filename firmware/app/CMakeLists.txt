@@ -11,7 +11,7 @@ include(${ZEPHYR_BASE}/samples/subsys/usb/common/common.cmake)
 #   usbdev.c                — CDC-ACM console bring-up
 #   wiced_hci.c             — pure WICED-HCI wire codec (host-tested)
 #   module_link.c           — CYW20706 runtime link: reset sequencing + UART0
-#   beacon_state.c          — the state-beacon payload codec (host-tested)
+#   bthome.c                — BTHome v2 payload codec + event classifier (host-tested)
 target_sources(app PRIVATE
     src/main.c
     src/buttons.c
@@ -20,7 +20,7 @@ target_sources(app PRIVATE
     src/usbdev.c
     src/wiced_hci.c
     src/module_link.c
-    src/beacon_state.c
+    src/bthome.c
     src/cybt_dl.c)          # pure download-protocol core (host-tested); safe to always build
 # DEV-ONLY module flasher + dumper. bt_wire.c is the shared download-mode UART
 # layer, compiled for either build. bt_download.c (flasher) #includes the

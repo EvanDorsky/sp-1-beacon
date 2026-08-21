@@ -32,10 +32,12 @@
 #define WHCI_FELDD_PING       0x03
 #define WHCI_FELDD_ADV        0x04
 #define WHCI_FELDD_CLEAR_BONDS 0x05
-/* beacon-sp-1 extension (the M3b CYW20706 beacon app): payload is the
- * BEACON_STATE_LEN state-beacon bytes (beacon_state.h); the app embeds them
- * in a non-connectable advertisement and (re)starts advertising. feldd's
- * shipped module app ignores this code, so sending it is always harmless. */
+/* beacon-sp-1 extension (the CYW20706 beacon app): payload is the raw BTHome
+ * v2 service-data content (bthome.h: devinfo + objects, variable length, pid
+ * at payload[2]); the app wraps it verbatim in a Service Data 0xFCD2 AD
+ * element, (re)starts non-connectable advertising, and acks with STATE_ACK
+ * echoing the pid. feldd's shipped module app ignores this code, so sending
+ * it is always harmless. */
 #define WHCI_FELDD_SET_STATE  0x10
 /* Events the M3b beacon app sends back in the FELDD group: READY (app up / ping
  * reply) and STATE_ACK, whose payload[0] echoes the seq of the SET_STATE it just

@@ -1,28 +1,24 @@
 /*
- * main.c — SP-1 BLE beacon firmware (M3a: the broadcast state machine).
+ * main.c — SP-1 BTHome beacon firmware (the broadcast state machine).
  *
  * The SP-1 spends its life in a low-power idle: the CYW20706 radio held in
- * reset, LEDs dark, and a slow scan (~every 40 ms) that raises the BTN_COM
- * rail just long enough to sample the two button ladders and the four faders,
- * then drops it again. Any activity — a button held OR a fader moved past the
- * deadband — wakes the radio and broadcasts the full control state
- * (beacon_state.h payload) as a BLE advertisement, refreshed on every change,
- * until things have been quiet for LINGER_MS. Then back to idle.
+ * reset, LEDs dark, and a slow scan (~every 40 ms on battery; continuous on
+ * USB) of the button ladders. A button press wakes the radio; the debounced
+ * press is classified into a BTHome v2 EVENT (tap -> press on release, hold
+ * -> long_press at the threshold), queued, and broadcast as BTHome service
+ * data (bthome.h, bluetooth/broadcast-format.md) that Home Assistant decodes
+ * natively. Each event gets its own packet id and is held on the air for an
+ * acked dwell so a duty-cycled receiver catches it; keepalives repeat the
+ * same pid (receivers dedup on it). LINGER_MS after the last activity the
+ * radio powers back down.
  *
  * While a button is held it sags the shared BTN_COM rail and corrupts fader
- * reads (feldd's bench finding), so fader values FREEZE at last-good while the
- * rail is loaded; fader moves are picked up whenever no button is down —
- * including in idle, where a fader move alone wakes the radio.
- *
- * Module app note: until the M3b beacon app is flashed, the module still runs
- * feldd's BLE-MIDI app — it ignores SET_STATE, so on today's hardware a wake
- * broadcasts feldd's presence advertisement (via the ADV command) instead of
- * the state payload. The state machine, timing, and power behavior are
- * identical either way, which is what M3a is for.
+ * reads (bench finding), so fader values FREEZE at last-good while the rail
+ * is loaded. Faders are read but not yet broadcast (phase 2) and no longer
+ * wake the radio.
  *
  * Boot safety (kept from feldd): links above the TE bootloader, charge-standby
- * gate, charger /CE enable, Track1+4 DFU escape (~3 s at the 20 ms scan), ••
- * 5 s hold = power off / •• wake.
+ * gate, charger /CE enable, Track1+4 power-off, •• hold = power off / •• wake.
  */
 #include <zephyr/kernel.h>
 #include <zephyr/sys/printk.h>
@@ -36,7 +32,7 @@
 #include "usbdev.h"
 #include "module_link.h"
 #include "wiced_hci.h"
-#include "beacon_state.h"
+#include "bthome.h"
 #include "wdt.h"
 #ifdef CONFIG_SP1_BT_DOWNLOAD
 #include "bt_download.h"
@@ -213,18 +209,15 @@ static void boot_signature(void)
 #define LINGER_MS       5000    /* keep broadcasting this long after the last
                                  * activity before going back to sleep */
 #define WAKE_TIMEOUT_MS 5000    /* module boot watchdog: give up and retry */
-#define KEEPALIVE_MS    1000    /* re-send the unchanged state this often */
-#define SET_STATE_RETRY_MS 50   /* before the module acks, re-send this fast so a
+#define KEEPALIVE_MS    1000    /* re-send the unchanged packet this often */
+#define SEND_RETRY_MS   50      /* before the module acks, re-send this fast so a
                                  * cold-boot-race SET_STATE isn't lost for ~1 s */
-#define MIN_PRESS_MS    600     /* hold a press in the broadcast at least this long
-                                 * of CONFIRMED on-air time (from the module's ack),
-                                 * so even a tap released during the cold boot is
-                                 * advertised + caught before its release goes out
-                                 * (600 ms rides out receiver WiFi-coex scan gaps;
-                                 * bench-tested) */
-#define MAX_HOLD_MS     1000    /* hard cap: never hold a released press longer than
-                                 * this from first broadcast, so a module that stops
-                                 * acking can't wedge the latch (and idle) forever */
+#define EVENT_DWELL_MS  600     /* keep an event packet on the air at least this
+                                 * long of CONFIRMED (acked) time before the next
+                                 * queued event may replace it — rides out the
+                                 * receiver's WiFi-coex scan gaps (bench-tested) */
+#define EVENT_CAP_MS    1000    /* hard cap from first send: a module that stops
+                                 * acking can't wedge the event queue forever */
 #define GAUGE_BATT_MS   10000   /* charge-gauge battery sample cadence (USB only) */
 #define FUNC_OFF_MS     2000    /* •• held this long powers the device off */
 #define FUNC_TAP_MS     1000    /* •• released before this = a status tap, not a hold */
@@ -236,54 +229,114 @@ static const char *const btn_name[BTN_COUNT] = {
 };
 
 static enum bc_state bc = BC_IDLE;
-static struct beacon_state st;         /* live control state */
-static struct beacon_state last_sent;  /* what's currently on the air */
-static uint8_t seq;
+static struct bthome_clf clf;          /* debounced edges -> press/long_press events */
+static uint8_t fader[4];               /* read + rail-freeze as before; phase 2 broadcasts them */
+static uint8_t battery = BTHOME_BATT_UNKNOWN;
+static uint8_t pid;                    /* BTHome packet id: bumps per EVENT, survives sleeps */
 static int64_t wake_t, activity_t, last_send_t;
-/* Per-button press latch: a press is recorded the instant it's detected and held
- * in the broadcast state until it has been on the air for MIN_PRESS_MS, so a tap
- * survives the module's cold boot and reaches the receiver. */
-static bool    vhold[BTN_COUNT];       /* press latched into the broadcast */
-static int64_t vhold_bc[BTN_COUNT];    /* uptime first broadcast, or -1 (max-hold cap ref) */
-static int64_t vhold_air[BTN_COUNT];   /* uptime the module acked it on air, or -1 */
 static bool    idle_rail_on;           /* idle rail currently powered (USB: kept on) */
 
-static void state_send(const struct beacon_state *s, int64_t now)
-{
-    uint8_t payload[BEACON_STATE_LEN];
+/* Pending button events (FIFO). Each event gets its own packet id and holds the
+ * air for EVENT_DWELL_MS of acked time before the next one may replace it. */
+#define EVQ_CAP 8
+static struct { uint8_t btn, ev; } evq[EVQ_CAP];
+static int evq_head, evq_len;
 
-    (void)beacon_state_encode(s, seq, payload, sizeof(payload));
-    (void)module_link_send(WHCI_FELDD_SET_STATE, payload, BEACON_STATE_LEN);
-    last_sent = *s;
-    last_send_t = now;
-    /* Note when each still-pending press first went out — the max-hold cap
-     * counts from here (the on-air dwell itself counts from the module's ack). */
-    for (int i = 0; i < BTN_COUNT; i++) {
-        if ((s->buttons & (uint16_t)(1u << i)) && vhold[i] && vhold_bc[i] < 0) {
-            vhold_bc[i] = now;
-        }
+static void evq_push(uint8_t btn, uint8_t ev)
+{
+    if (evq_len >= EVQ_CAP) {
+        printk("BC: event queue full, dropping %s\n", btn_name[btn]);
+        return;
     }
+    int slot = (evq_head + evq_len) % EVQ_CAP;
+    evq[slot].btn = btn;
+    evq[slot].ev = ev;
+    evq_len++;
 }
 
-/* Scan buttons + faders into st. Fader reads are gated on the rail being
- * unloaded (a held button sags the rail and corrupts them: they freeze at
- * last-good instead). Returns 1 if any button event fired this tick. */
+static bool evq_pop(uint8_t *btn, uint8_t *ev)
+{
+    if (evq_len == 0) {
+        return false;
+    }
+    *btn = evq[evq_head].btn;
+    *ev = evq[evq_head].ev;
+    evq_head = (evq_head + 1) % EVQ_CAP;
+    evq_len--;
+    return true;
+}
+
+/* The current on-air packet: its per-button event values (content for the
+ * current pid — NEVER changed without bumping pid, so receivers that dedup on
+ * pid can't see two contents under one id). */
+static uint8_t cur_ev[BTHOME_BTN_COUNT];
+static bool    cur_has_event;
+static int64_t pkt_send_t;             /* first send of the current pid */
+static int64_t pkt_air_t;              /* first ack of the current pid, -1 = not yet */
+
+static void payload_send(int64_t now)
+{
+    uint8_t p[BTHOME_MAX_PAYLOAD];
+    int n = bthome_encode(pid, battery, cur_ev, p, sizeof(p));
+
+    if (n > 0) {
+        (void)module_link_send(WHCI_FELDD_SET_STATE, p, (uint16_t)n);
+    }
+    last_send_t = now;
+}
+
+/* Start a new packet: bump pid, set the content (btn < 0 = all-none), send. */
+static void packet_new(int btn, uint8_t ev, int64_t now)
+{
+    for (int i = 0; i < BTHOME_BTN_COUNT; i++) {
+        cur_ev[i] = BTHOME_EV_NONE;
+    }
+    cur_has_event = false;
+    if (btn >= 0) {
+        cur_ev[btn] = ev;
+        cur_has_event = true;
+        printk("BC: event %s %s (pid %u)\n", btn_name[btn],
+               ev == BTHOME_EV_LONG_PRESS ? "long_press" : "press", (uint8_t)(pid + 1));
+    }
+    pid++;
+    pkt_send_t = now;
+    pkt_air_t = -1;
+    payload_send(now);
+}
+
+/* True while any button is (debounced-)down. */
+static bool any_down(void)
+{
+    for (int i = 0; i < BTN_COUNT; i++) {
+        if (bthome_clf_down(&clf, i)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Scan buttons + faders. Debounced edges feed the classifier (tap -> press on
+ * release, hold -> long_press at the threshold); resulting events are queued.
+ * Fader reads are gated on the rail being unloaded (a held button sags the rail
+ * and corrupts them: they freeze at last-good instead). Returns the number of
+ * edges seen this tick. */
 static int scan_controls(void)
 {
     struct button_event evt[BTN_COUNT];
     int n = buttons_scan(evt, BTN_COUNT);
+    int64_t now = k_uptime_get();
 
     for (int i = 0; i < n; i++) {
         printk("BTN %s %s\n", btn_name[evt[i].idx], evt[i].pressed ? "down" : "up");
-        if (evt[i].pressed) {
-            st.buttons |= (uint16_t)(1u << evt[i].idx);
-            if (!vhold[evt[i].idx]) {          /* new press: latch it the instant it's detected */
-                vhold[evt[i].idx] = true;
-                vhold_bc[evt[i].idx] = -1;     /* not yet broadcast */
-                vhold_air[evt[i].idx] = -1;    /* not yet acked on air */
-            }
-        } else {
-            st.buttons &= (uint16_t)~(1u << evt[i].idx);   /* physical release; the latch dwell releases it on air */
+        uint8_t e = bthome_clf_edge(&clf, evt[i].idx, evt[i].pressed, now);
+        if (e != BTHOME_EV_NONE) {
+            evq_push(evt[i].idx, e);
+        }
+    }
+    for (int i = 0; i < BTN_COUNT; i++) {      /* long-press threshold crossings */
+        uint8_t e = bthome_clf_poll(&clf, i, now);
+        if (e != BTHOME_EV_NONE) {
+            evq_push((uint8_t)i, e);
         }
     }
 
@@ -291,34 +344,11 @@ static int scan_controls(void)
         for (int i = 0; i < 4; i++) {
             int raw = controls_read_raw(2 + i);
             if (raw >= 0) {
-                st.fader[i] = (uint8_t)(raw >> 4);
+                fader[i] = (uint8_t)(raw >> 4);
             }
         }
     }
     return n;
-}
-
-/* Build the state to broadcast: the scanned state, but with each latched press
- * held on the air until MIN_PRESS_MS after it first went out (or, until then,
- * unconditionally). Expires latches whose dwell has elapsed. Call once per tick. */
-static void tx_state(struct beacon_state *out, int64_t now)
-{
-    *out = st;
-    uint16_t b = st.buttons;
-    for (int i = 0; i < BTN_COUNT; i++) {
-        if (!vhold[i]) {
-            continue;
-        }
-        bool phys = (st.buttons & (uint16_t)(1u << i)) != 0;
-        bool onair_done = vhold_air[i] >= 0 && now - vhold_air[i] >= MIN_PRESS_MS;
-        bool cap_done   = vhold_bc[i]  >= 0 && now - vhold_bc[i]  >= MAX_HOLD_MS;
-        if (!phys && (onair_done || cap_done)) {
-            vhold[i] = false;                  /* released + advertised long enough (or capped) */
-        } else {
-            b |= (uint16_t)(1u << i);          /* held, still dwelling, or not yet on air */
-        }
-    }
-    out->buttons = b;
 }
 
 static void bc_go_idle(void)
@@ -328,9 +358,7 @@ static void bc_go_idle(void)
     controls_rail(0);
     idle_rail_on = false;                  /* rail dropped; next idle scan re-settles */
     led_pin(SP1_LED1, false);
-    for (int i = 0; i < BTN_COUNT; i++) {  /* drop any pending press latch */
-        vhold[i] = false;
-    }
+    evq_head = evq_len = 0;                /* defensive: idle is only reached quiet */
     bc = BC_IDLE;
     printk("BC: idle (rail duty-cycled, module in reset)\n");
 }
@@ -394,8 +422,7 @@ int main(void)
 
     printk("sp1-beacon M3a (wake=%08x)\n", wake_reas);
 
-    st.battery = BEACON_BATTERY_UNKNOWN;
-    last_sent = st;
+    bthome_clf_init(&clf);
     int64_t  func_since = -1;   /* uptime •• was first seen held (armed), or -1 */
     int      func_armed = 0;    /* honor •• only after it has read released once */
     int64_t  gauge_batt_t = -1; /* last charge-gauge battery sample time, or -1 */
@@ -427,15 +454,13 @@ int main(void)
                 idle_rail_on = false;
             }
 
-            /* Wake on ANY activity: a (even not-yet-debounced) button on the
-             * rail, a committed button, or a fader moved past the deadband. The
-             * SPECIFIC button is left to the debounced scan during the module's
-             * boot (~24 ms commit at the 8 ms cadence) — a single instantaneous
-             * decode here sampled mid-bounce could latch the wrong button. */
-            if (loaded || st.buttons != 0) {
+            /* Wake on a button: a (even not-yet-debounced) press on the rail or
+             * a committed button. The SPECIFIC button is left to the debounced
+             * scan during the module's boot (~24 ms commit at the 8 ms cadence).
+             * Fader moves no longer wake — phase 1 BTHome broadcasts only
+             * button events (bluetooth/broadcast-format.md). */
+            if (loaded || any_down() || evq_len > 0) {
                 bc_wake("button");
-            } else if (beacon_state_changed(&last_sent, &st)) {
-                bc_wake("fader");
             }
         } else {
             scan_controls();
@@ -448,58 +473,52 @@ int main(void)
             if (module_link_state() == MODULE_UP) {
                 int64_t now = k_uptime_get();
                 printk("BC: on (module boot %d ms)\n", (int)(now - wake_t));
-                (void)module_link_adv(true);   /* feldd-app compat: presence beacon */
+                (void)module_link_adv(true);   /* legacy-app compat; harmless on the beacon app */
                 int pct = battery_pct(controls_read_raw(6));   /* one battery read per wake */
                 if (pct >= 0) {
-                    st.battery = (uint8_t)pct;
+                    battery = (uint8_t)pct;
                 }
-                struct beacon_state txs;
-                tx_state(&txs, now);           /* include any press latched during the boot */
-                seq++;
-                state_send(&txs, now);
+                /* First packet of the session: the first queued event if one
+                 * already landed during the boot, else an all-none baseline. */
+                uint8_t btn, ev;
+                if (evq_pop(&btn, &ev)) {
+                    packet_new(btn, ev, now);
+                } else {
+                    packet_new(-1, BTHOME_EV_NONE, now);
+                }
                 activity_t = now;              /* linger from the first broadcast, not from wake */
                 bc = BC_ON;
             } else if (k_uptime_get() - wake_t > WAKE_TIMEOUT_MS) {
                 printk("BC: module boot timeout, retrying via idle\n");
                 module_link_power(false);
-                bc_go_idle();                  /* still-held buttons re-wake next tick */
+                bc = BC_IDLE;                  /* keep queued events; re-wake next tick */
+                controls_rail(0);
+                idle_rail_on = false;
+                printk("BC: idle (module boot retry)\n");
             }
         } else if (bc == BC_ON) {
             int64_t now = k_uptime_get();
 
-            struct beacon_state txs;
-            tx_state(&txs, now);               /* st + latched presses (min on-air hold) */
-
-            bool changed = beacon_state_changed(&last_sent, &txs);
-            if (changed) {
-                seq++;
-                state_send(&txs, now);
+            bool acked = module_link_last_ack_seq() == (int)pid;
+            if (acked && pkt_air_t < 0) {
+                pkt_air_t = now;               /* current pid confirmed on the air */
             }
-            /* Warm-window timer restarts on every new-state broadcast AND while
-             * any button is (virtually) held, so we idle LINGER_MS after the
-             * LAST activity — not LINGER_MS after the first press of a run. */
-            if (changed || txs.buttons != 0) {
+            /* An event packet must stay up for EVENT_DWELL_MS of acked time (or
+             * the hard cap) before the next queued event may replace it; a
+             * no-event packet may be replaced immediately. */
+            bool dwell_done = !cur_has_event ||
+                              (pkt_air_t >= 0 && now - pkt_air_t >= EVENT_DWELL_MS) ||
+                              (now - pkt_send_t >= EVENT_CAP_MS);
+            uint8_t btn, ev;
+            if (dwell_done && evq_pop(&btn, &ev)) {
+                packet_new(btn, ev, now);      /* next event -> new pid */
                 activity_t = now;
+            } else if (now - last_send_t >= (acked ? KEEPALIVE_MS : SEND_RETRY_MS)) {
+                payload_send(now);             /* same pid + content: retry/keepalive */
             }
-            /* Once the module acks the current state, it's confirmed on the air:
-             * start each still-held press's on-air dwell from now. */
-            bool acked = module_link_last_ack_seq() == (int)seq;
-            if (acked) {
-                for (int i = 0; i < BTN_COUNT; i++) {
-                    if (vhold[i] && vhold_air[i] < 0 &&
-                        (last_sent.buttons & (uint16_t)(1u << i))) {
-                        vhold_air[i] = now;
-                    }
-                }
-            }
-            /* Nothing changed: keep (re)sending the current state — fast until
-             * the module acks this seq (the first SET_STATE after a cold boot
-             * can beat the module's BLE stack up), then slow keepalive. */
-            if (!changed) {
-                int64_t due = acked ? KEEPALIVE_MS : SET_STATE_RETRY_MS;
-                if (now - last_send_t >= due) {
-                    state_send(&txs, now);
-                }
+            /* Linger restarts while anything is held or events are pending. */
+            if (any_down() || evq_len > 0) {
+                activity_t = now;
             }
             if (now - activity_t > LINGER_MS) {
                 bc_go_idle();
@@ -530,10 +549,9 @@ int main(void)
             }
         } else {
             if (func_since >= 0 && k_uptime_get() - func_since < FUNC_TAP_MS) {
-                printk("•• tap: bc=%d module=%d buttons=%03x faders=%u/%u/%u/%u batt=%u seq=%u\n",
-                       (int)bc, (int)module_link_state(), st.buttons,
-                       st.fader[0], st.fader[1], st.fader[2], st.fader[3],
-                       st.battery, seq);
+                printk("•• tap: bc=%d module=%d pid=%u evq=%d faders=%u/%u/%u/%u batt=%u\n",
+                       (int)bc, (int)module_link_state(), pid, evq_len,
+                       fader[0], fader[1], fader[2], fader[3], battery);
                 if (module_link_state() == MODULE_UP) {
                     (void)module_link_ping();
                 }
