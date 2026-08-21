@@ -9,9 +9,9 @@ Both inputs are Intel HEX. The minidriver is Infineon-licensed and our DS image
 is Cypress-derived, so the generated header is GITIGNORED — never commit it, and
 never commit these hex inputs into this repo.
 
-  minidriver:  ~/src/sp-1-ble-radio/mtb_shared/wiced_btsdk/dev-kit/bsp/
+  minidriver:  ~/src/home-auto/sp-1-ble-radio/mtb_shared/wiced_btsdk/dev-kit/bsp/
                TARGET_CYBT-353027-EVAL/release-*/uart.hex
-  DS image:    ~/src/sp-1-ble-radio/LE_Hello_Sensor/build/CYBT-353027-EVAL/
+  DS image:    ~/src/home-auto/sp-1-ble-radio/LE_Hello_Sensor/build/CYBT-353027-EVAL/
                Debug/BLE_HelloSensor_download.hex
 
 Usage:

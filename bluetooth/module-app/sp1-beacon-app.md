@@ -179,15 +179,15 @@ MD=".../ModusToolboxProgtools-1.9/mtb-programmer/ModusToolbox Programmer.app/\
 Contents/mtb-programmer/BT/CYBT_353027_EVAL/minidriver.hex"
 
 # 2. build the module app for DS 0xFF003000 (0x3000) instead of the eval 0x4000
-cd ~/src/sp-1-ble-radio/LE_Hello_Sensor
+cd ~/src/home-auto/sp-1-ble-radio/LE_Hello_Sensor
 sed 's/ConfigDSLocation = 16384/ConfigDSLocation = 12288/' \
   .../TARGET_CYBT-353027-EVAL/release-*/CYBT-353027-EVAL-SFLASH.btp > CYBT-353027-EVAL-SP1.btp
 make build CY_CORE_BTP="$PWD/CYBT-353027-EVAL-SP1.btp"   # -> DS available start 0xFF003000
 
 # 3. embed minidriver + the 0xFF003000 DS image into the gitignored blob header
-cd ~/src/beacon-sp-1
+cd ~/src/home-auto/beacon-sp-1
 scripts/gen_blobs.py --minidriver "$MD" \
-  --ds ~/src/sp-1-ble-radio/LE_Hello_Sensor/build/CYBT-353027-EVAL/Debug/BLE_HelloSensor_download.hex \
+  --ds ~/src/home-auto/sp-1-ble-radio/LE_Hello_Sensor/build/CYBT-353027-EVAL/Debug/BLE_HelloSensor_download.hex \
   --ds-base 0xFF003000
 
 # 4. build the flasher (dry-run first, then armed)
