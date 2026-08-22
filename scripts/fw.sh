@@ -79,7 +79,11 @@ if off != -1:
     sys.exit(f"AUDIT FAIL: chip-erase command bytes 01 CE FF at offset {off:#x}")
 EOF
   echo "audit OK: provisioning on, no chip-erase symbols, no 01 CE FF in the image"
-  shasum -a 256 "$BIN_OUT"; }
+  # Preserve the audited artifact under its own name so a later dev build
+  # can't silently replace the thing you publish.
+  cp "$BIN_OUT" "$APP/sp1_beacon_release.bin"
+  echo "release artifact -> $APP/sp1_beacon_release.bin"
+  shasum -a 256 "$APP/sp1_beacon_release.bin"; }
 
 do_bin(){
   [ -f "$ELF" ] || { echo "no ELF - run a build first"; exit 1; }
@@ -93,6 +97,14 @@ do_bin(){
   "$OBJCOPY" -O binary --gap-fill 0xFF --remove-section=.debug_* --remove-section=.comment \
     --remove-section=.ARM.attributes "$ELF" "$BIN_OUT" || exit 1
   echo "flashable image -> $BIN_OUT  ($(wc -c <"$BIN_OUT") bytes, vector table @0x20000 ok)"
+  # Every target writes the SAME sp1_beacon.bin, so say loudly which variant
+  # this is — a plain `fw.sh bin` after a release build silently replaces the
+  # publishable image with one that has NO radio image (bitten on the bench).
+  if grep -q '^CONFIG_SP1_PROVISION=y' "$BUILD/app/zephyr/.config" 2>/dev/null; then
+    echo "image variant: RELEASE — radio image + provisioning EMBEDDED"
+  else
+    echo "image variant: DEV — no radio image, no provisioning"
+  fi
   echo "flash it at https://solderless.engineering (Chrome): enter bootloader (power off, hold track 1+4, plug USB), upload this .bin"
 }
 
