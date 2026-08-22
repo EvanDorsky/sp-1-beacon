@@ -136,55 +136,6 @@ static void charge_gauge(int pct, int chg, uint32_t blink)
     }
 }
 
-/* CHARGE-STANDBY GATE (kept from feldd/looper): only a •• wake or a watchdog
- * recovery is a real turn-on; for every other power event, park showing the
- * battery gauge (on USB) or drop to SYSTEM_OFF (on battery) so a full boot can
- * never brown-out-thrash a low cell. Returns only on a real turn-on. */
-static void charge_standby_gate(uint32_t wake_reas)
-{
-    if (wake_reas & (POWER_RESETREAS_OFF_Msk | POWER_RESETREAS_DOG_Msk)) {
-        return;
-    }
-
-    int64_t hold_t = -1;
-    uint32_t tick = 0;
-    int adc_up = 0;
-    int last_raw = -1;
-    for (;;) {
-        feed_wdt();
-        if (nrf_gpio_pin_read(SP1_FUNC_BTN) == 0) {   /* •• pressed */
-            if (hold_t < 0) {
-                hold_t = k_uptime_get();
-            } else if (k_uptime_get() - hold_t >= 600) {
-                break;                                /* held ~0.6 s: power on */
-            }
-            led_idx(0, true);
-        } else {
-            hold_t = -1;
-            if (!usb_present()) {
-                power_off();                          /* battery + idle: off */
-            }
-            led_idx(0, false);
-            if (!adc_up) {
-                controls_init();
-                led_set_brightness(LED_BRIGHTNESS_DEFAULT);
-                last_raw = controls_read_raw(6);      /* battery */
-                adc_up = 1;
-            } else if ((tick % 50u) == 0u) {
-                last_raw = controls_read_raw(6);
-            }
-            charge_gauge(battery_pct(last_raw), charging(), tick);
-        }
-        k_msleep(40);
-        tick++;
-    }
-
-    led_set_brightness(LED_BRIGHTNESS_DEFAULT);
-    for (int i = 0; i < 4; i++) {
-        led_idx(4 + i, false);
-    }
-}
-
 /* Boot cue: quick track-LED 1->2->3->4 sweep. */
 static void boot_signature(void)
 {
@@ -421,7 +372,7 @@ static bool radio_not_ours;
  * TOWARDS the PLAY button (top right) — fader LEDs 1→4 (idx 0..3), then the
  * charge LEDs climbing to the full-charge light (idx 4..7), pointing the user
  * at the gesture. While PLAY is held the chase accelerates smoothly with the
- * hold — 150 ms/step down to 50 ms/step across the 5 s consent hold — as live
+ * hold — 150 ms/step down to 35 ms/step across the 5 s consent hold — as live
  * feedback that the gesture is registering. held_ms = 0 when PLAY is up. */
 static void chase_tick(int64_t held_ms)
 {
@@ -429,9 +380,9 @@ static void chase_tick(int64_t held_ms)
     static int step;
     int64_t now = k_uptime_get();
 
-    int64_t period = 150 - held_ms / 50;     /* -2 ms per 100 ms of hold */
-    if (period < 50) {
-        period = 50;                         /* floor reached right at ~5 s */
+    int64_t period = 150 - (held_ms * 23) / 1000;   /* 150 -> 35 across the 5 s hold */
+    if (period < 35) {
+        period = 35;                                /* floor lands right at ~5 s */
     }
     if (now - frame_t < period) {
         return;
@@ -444,10 +395,13 @@ static void chase_tick(int64_t held_ms)
 }
 
 #ifdef CONFIG_SP1_PROVISION
+static bool radio_probed;    /* probe once per boot (gate or main, whichever first) */
+
 /* One radio probe at boot (USB only): boot the module, listen for its app to
  * identify itself, power it back down. Sets radio_not_ours. */
 static void radio_probe(void)
 {
+    radio_probed = true;
     printk("BT: probing which app the radio runs...\n");
     module_link_power(true);
     int64_t t0 = k_uptime_get();
@@ -483,6 +437,127 @@ static void prov_led_progress(enum bt_prov_phase phase, int pct)
     }
 }
 #endif /* CONFIG_SP1_PROVISION */
+
+/* CHARGE-STANDBY GATE (kept from feldd/looper): only a •• wake or a watchdog
+ * recovery is a real turn-on; for every other power event, park showing the
+ * battery gauge (on USB) or drop to SYSTEM_OFF (on battery) so a full boot can
+ * never brown-out-thrash a low cell. Returns only on a real turn-on.
+ *
+ * The provisioning gesture works while parked here too — a FIRST FLASH boots
+ * straight into this gate, and requiring an unplug/power-on/replug dance to
+ * reach the flash path would be miserable. The gate samples PLAY off the
+ * tracks ladder (rail raised briefly per tick), shows the chase (which
+ * overrides the charge gauge) when the radio needs provisioning / CHASE_DEMO /
+ * the hold is in progress, and runs the same 5 s gesture. */
+static void charge_standby_gate(uint32_t wake_reas)
+{
+    if (wake_reas & (POWER_RESETREAS_OFF_Msk | POWER_RESETREAS_DOG_Msk)) {
+        return;
+    }
+
+    int64_t hold_t = -1;
+    uint32_t tick = 0;
+    int adc_up = 0;
+    int last_raw = -1;
+#ifdef CONFIG_SP1_PROVISION
+    int64_t play_since = -1;   /* uptime PLAY was first seen held, or -1 */
+    int64_t play_seen = 0;     /* last tick PLAY read as down (debounce grace) */
+    int probed = 0;
+    int chasing = 0;
+#endif
+    for (;;) {
+        feed_wdt();
+        if (nrf_gpio_pin_read(SP1_FUNC_BTN) == 0) {   /* •• pressed */
+            if (hold_t < 0) {
+                hold_t = k_uptime_get();
+            } else if (k_uptime_get() - hold_t >= 600) {
+                break;                                /* held ~0.6 s: power on */
+            }
+            led_idx(0, true);
+        } else {
+            hold_t = -1;
+            if (!usb_present()) {
+                power_off();                          /* battery + idle: off */
+            }
+            led_idx(0, false);
+            if (!adc_up) {
+                controls_init();
+                led_set_brightness(LED_BRIGHTNESS_DEFAULT);
+                last_raw = controls_read_raw(6);      /* battery */
+                adc_up = 1;
+            } else if ((tick % 50u) == 0u) {
+                last_raw = controls_read_raw(6);
+            }
+#ifdef CONFIG_SP1_PROVISION
+            if (!probed) {                 /* once, on USB: which app is on the radio? */
+                probed = 1;
+                module_link_init();
+                radio_probe();
+            }
+            int64_t now = k_uptime_get();
+            controls_rail(1);              /* sample PLAY off the tracks ladder */
+            k_busy_wait(2000);
+            int play = buttons_decode_tracks_pure(controls_read_raw(0)) == 0;
+            controls_rail(0);
+            if (play) {
+                if (play_since < 0) {
+                    play_since = now;
+                }
+                play_seen = now;
+            } else if (play_since >= 0 && now - play_seen > 150) {
+                play_since = -1;           /* released (few-tick bounce grace) */
+            }
+            bool held = play_since >= 0;
+            if (held && now - play_since >= 5000) {
+                printk("PROVISION: PLAY held 5 s in charge standby — flashing the radio\n");
+                for (int i = 0; i < LED_COUNT; i++) {
+                    led_idx(i, false);
+                }
+                bool ok = bt_provision_run(prov_led_progress);
+                for (int i = 0; i < LED_COUNT; i++) {
+                    led_idx(i, false);
+                }
+                for (int n = 0; n < 6; n++) {
+                    for (int i = 0; i < 4; i++) {
+                        led_idx(ok ? 4 + i : i, n & 1);
+                    }
+                    feed_wdt();
+                    k_msleep(250);
+                }
+                for (int i = 0; i < LED_COUNT; i++) {
+                    led_idx(i, false);
+                }
+                module_link_init();        /* re-own the UART; module in reset */
+                if (ok) {
+                    radio_not_ours = false;
+                }
+                play_since = -1;
+            }
+            if (radio_not_ours || CHASE_DEMO || held) {
+                chasing = 1;
+                chase_tick(held ? now - play_since : 0);
+            } else {
+                if (chasing) {             /* chase just ended: clear its LEDs */
+                    chasing = 0;
+                    for (int i = 0; i < LED_COUNT; i++) {
+                        led_idx(i, false);
+                    }
+                }
+                charge_gauge(battery_pct(last_raw), charging(), tick);
+            }
+#else
+            charge_gauge(battery_pct(last_raw), charging(), tick);
+#endif
+        }
+        k_msleep(40);
+        tick++;
+    }
+
+    led_set_brightness(LED_BRIGHTNESS_DEFAULT);
+    for (int i = 0; i < LED_COUNT; i++) {
+        led_idx(i, false);                 /* clear gauge + any chase remnants */
+    }
+}
 
 static void bc_go_idle(void)
 {
@@ -557,9 +632,9 @@ int main(void)
 
 #ifdef CONFIG_SP1_PROVISION
     /* On USB power, find out which app the radio runs (drives the "needs
-     * provisioning" sparkle). On battery skip the probe — a wake identifies
-     * the app as a side effect anyway. */
-    if (usb_present()) {
+     * provisioning" chase) — unless the charge-standby gate already probed.
+     * On battery skip it — a wake identifies the app as a side effect anyway. */
+    if (usb_present() && !radio_probed) {
         radio_probe();
     }
 #endif

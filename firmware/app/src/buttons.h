@@ -7,6 +7,10 @@ int  buttons_init(void);
 /* Scan both ladders once; emit edges (press/release) for the 9 buttons into
    evt[] (cap entries); returns number of edges. Call ~every 8ms. */
 int  buttons_scan(struct button_event *evt, int cap);
+/* Instantaneous TRACKS-ladder decode (pure): -1 idle, 0=Play, 1..4=Track1..4.
+   The charge-standby gate samples PLAY with this (rail up briefly) for the
+   provisioning gesture, without pulling in the full debounced scan. */
+int  buttons_decode_tracks_pure(int v);
 /* True while the Track1+4 DFU band has been held long enough; the caller acts. */
 int  buttons_dfu_held(void);
 /* True if THIS scan's raw ladder reads show any button pulling the rail
