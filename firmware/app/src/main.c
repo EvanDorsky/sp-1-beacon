@@ -34,7 +34,7 @@
 #include "wiced_hci.h"
 #include "bthome.h"
 #include "wdt.h"
-#ifdef CONFIG_SP1_BT_DOWNLOAD
+#if defined(CONFIG_SP1_BT_DOWNLOAD) || defined(CONFIG_SP1_PROVISION)
 #include "bt_download.h"
 #endif
 #ifdef CONFIG_SP1_BT_DUMP
@@ -405,6 +405,74 @@ static int scan_controls(void)
     return n;
 }
 
+/* ---- radio provisioning (CONFIG_SP1_PROVISION): state, sparkle, gesture ---- */
+
+/* True once the radio is KNOWN to be running something other than our beacon
+ * app (stock TE = silent, feldd = foreign 0xF0 traffic, older beacon build).
+ * Drives the "needs provisioning" sparkle; cleared by a successful provision
+ * or by our app identifying itself on a later wake. */
+static bool radio_not_ours;
+
+/* Sparkle: a random twinkle over all 8 LEDs, the "radio needs provisioning"
+ * cue. Frame every ~90 ms from a tiny xorshift; ~2 sparse LEDs lit at a time. */
+static void sparkle_tick(void)
+{
+    static uint32_t rng = 0xC0FFEE21u;
+    static int64_t frame_t;
+    int64_t now = k_uptime_get();
+
+    if (now - frame_t < 90) {
+        return;
+    }
+    frame_t = now;
+    rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;
+    uint32_t mask = rng & (rng >> 8) & 0xFF;      /* AND thins to ~2 bits */
+    for (int i = 0; i < LED_COUNT; i++) {
+        led_idx(i, (mask >> i) & 1u);
+    }
+}
+
+#ifdef CONFIG_SP1_PROVISION
+/* One radio probe at boot (USB only): boot the module, listen for its app to
+ * identify itself, power it back down. Sets radio_not_ours. */
+static void radio_probe(void)
+{
+    printk("BT: probing which app the radio runs...\n");
+    module_link_power(true);
+    int64_t t0 = k_uptime_get();
+    while (k_uptime_get() - t0 < 3500 && module_link_app() == 0) {
+        feed_wdt();
+        module_link_poll();
+        k_msleep(10);
+    }
+    radio_not_ours = (module_link_app() != 1);
+    module_link_power(false);
+    printk("BT: radio app = %s\n",
+           module_link_app() == 1 ? "ours" :
+           module_link_app() == -1 ? "OTHER — hold PLAY 5 s (USB in) to provision"
+                                   : "silent/stock — hold PLAY 5 s (USB in) to provision");
+}
+
+/* Provisioning progress on the 4 side LEDs: PREP = all four blink together;
+ * WRITE/VERIFY = a bar (full quarters solid, the active quarter blinking).
+ * Called from inside the flash engine every chunk, so the blink stays live. */
+static void prov_led_progress(enum bt_prov_phase phase, int pct)
+{
+    bool blink = (k_uptime_get() / 120) & 1;
+
+    if (phase == BT_PROV_PREP) {
+        for (int i = 0; i < 4; i++) {
+            led_idx(4 + i, blink);
+        }
+        return;
+    }
+    int q = pct / 25;                             /* 0..4 full quarters */
+    for (int i = 0; i < 4; i++) {
+        led_idx(4 + i, i < q ? true : (i == q ? blink : false));
+    }
+}
+#endif /* CONFIG_SP1_PROVISION */
+
 static void bc_go_idle(void)
 {
     (void)module_link_adv(false);          /* courtesy; the reset kills it anyway */
@@ -476,6 +544,15 @@ int main(void)
 
     printk("sp1-beacon M3a (wake=%08x)\n", wake_reas);
 
+#ifdef CONFIG_SP1_PROVISION
+    /* On USB power, find out which app the radio runs (drives the "needs
+     * provisioning" sparkle). On battery skip the probe — a wake identifies
+     * the app as a side effect anyway. */
+    if (usb_present()) {
+        radio_probe();
+    }
+#endif
+
     bthome_clf_init(&clf);
     int64_t  func_since = -1;   /* uptime •• was first seen held (armed), or -1 */
     int      func_armed = 0;    /* honor •• only after it has read released once */
@@ -528,6 +605,7 @@ int main(void)
             if (module_link_state() == MODULE_UP) {
                 int64_t now = k_uptime_get();
                 printk("BC: on (module boot %d ms)\n", (int)(now - wake_t));
+                radio_not_ours = (module_link_app() == -1);   /* wake re-identifies */
                 (void)module_link_adv(true);   /* legacy-app compat; harmless on the beacon app */
                 int pct = battery_pct(controls_read_raw(6));   /* one battery read per wake */
                 if (pct >= 0) {
@@ -548,6 +626,9 @@ int main(void)
                 bc = BC_ON;
             } else if (k_uptime_get() - wake_t > WAKE_TIMEOUT_MS) {
                 printk("BC: module boot timeout, retrying via idle\n");
+                if (module_link_app() != 1) {
+                    radio_not_ours = true;     /* silent radio: stock TE app */
+                }
                 module_link_power(false);
                 bc = BC_IDLE;                  /* keep queued events; re-wake next tick */
                 controls_rail(0);
@@ -622,11 +703,62 @@ int main(void)
             func_armed = 1;
         }
 
+#ifdef CONFIG_SP1_PROVISION
+        /* CONSENT GESTURE: PLAY held 5 s with USB power in = provision the
+         * radio (flash the beacon module app). Explicit opt-in, USB required
+         * (never a multi-minute write on a marginal battery). The engine is
+         * timeout-bounded and template-gated; on refusal/failure we return
+         * here with the •• power-off escape intact. */
+        if (usb_now && bthome_clf_down(&clf, 0) &&
+            k_uptime_get() - clf.down_t[0] >= 5000) {
+            printk("PROVISION: PLAY held 5 s + USB — flashing the radio\n");
+            for (int i = 0; i < LED_COUNT; i++) {
+                led_idx(i, false);
+            }
+            bool ok = bt_provision_run(prov_led_progress);
+            /* Outcome cue: side LEDs pulse = success; track LEDs pulse = failed
+             * (safe to just hold PLAY again to retry). */
+            for (int i = 0; i < LED_COUNT; i++) {
+                led_idx(i, false);
+            }
+            for (int n = 0; n < 6; n++) {
+                for (int i = 0; i < 4; i++) {
+                    led_idx(ok ? 4 + i : i, n & 1);
+                }
+                feed_wdt();
+                k_msleep(250);
+            }
+            for (int i = 0; i < LED_COUNT; i++) {
+                led_idx(i, false);
+            }
+            module_link_init();          /* re-own the module UART (module in reset) */
+            bthome_clf_init(&clf);       /* drop the held-PLAY state + any queue */
+            evq_head = evq_len = 0;
+            if (ok) {
+                radio_not_ours = false;  /* next wake re-confirms via READY */
+            }
+            bc_go_idle();
+        }
+#endif /* CONFIG_SP1_PROVISION */
+
+        /* "Radio needs provisioning" sparkle: overrides the charge gauge until
+         * the radio is confirmed to run our app. */
+        static bool sparkling;
+        if (radio_not_ours) {
+            sparkling = true;
+            sparkle_tick();
+        } else if (sparkling) {
+            sparkling = false;
+            for (int i = 0; i < LED_COUNT; i++) {
+                led_idx(i, false);
+            }
+        }
+
         /* Charge gauge on the 4 side LEDs whenever USB is plugged in — a
          * glanceable charge state while the device is powered on. Battery moves
          * slowly so it's sampled every GAUGE_BATT_MS; the blink is time-based so
          * its rate stays steady across the 8/40 ms loop cadence. */
-        if (usb_present()) {
+        if (!radio_not_ours && usb_present()) {
             int64_t gnow = k_uptime_get();
             if (gauge_batt_t < 0 || gnow - gauge_batt_t >= GAUGE_BATT_MS) {
                 gauge_batt_t = gnow;

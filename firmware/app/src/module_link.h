@@ -40,6 +40,14 @@ void module_link_poll(void);
  * The broadcast loop re-sends SET_STATE until this matches the current seq. */
 int  module_link_last_ack_seq(void);
 
+/* Which app the module is running, learned from its FELDD-group traffic since
+ * the last power-on: 0 = unknown (nothing identifying seen yet), 1 = OUR
+ * beacon app (READY 0x80 with the max-payload byte 24, or any STATE_ACK),
+ * -1 = some other app (feldd, or an older beacon build) — group-0xF0 traffic
+ * that doesn't match ours. A stock TE radio sends nothing in group 0xF0 and
+ * stays 0 (with module_link_state() reporting BOOTING). */
+int  module_link_app(void);
+
 /* Send a FELDD-group command (wiced_hci.h WHCI_FELDD_*). Returns 0, or -1 if
  * the module is not powered. */
 int  module_link_send(uint8_t code, const uint8_t *payload, uint16_t len);

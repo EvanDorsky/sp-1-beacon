@@ -35,6 +35,11 @@ static enum module_state state = MODULE_OFF;
 static int64_t boot_t;
 static bool quiet_warned;
 static volatile int last_ack_seq = -1;   /* seq echoed by the latest STATE_ACK */
+static volatile int app_id;              /* 0 unknown / 1 ours / -1 other (see .h) */
+
+/* Our beacon app's READY payload: the max SET_STATE it accepts (24 bytes). An
+ * older beacon build advertised 9; feldd's READY differs again. */
+#define APP_READY_MAX_PAYLOAD 24
 
 static struct whci_parser parser;
 
@@ -106,6 +111,7 @@ void module_link_power(bool on)
         boot_t = k_uptime_get();
         quiet_warned = false;
         last_ack_seq = -1;   /* fresh boot: no state acked yet */
+        app_id = 0;          /* re-identify the app from its traffic */
         printk("BT: module reset released (normal boot)\n");
     } else {
         if (state == MODULE_OFF) {
@@ -126,6 +132,11 @@ enum module_state module_link_state(void)
 int module_link_last_ack_seq(void)
 {
     return last_ack_seq;
+}
+
+int module_link_app(void)
+{
+    return app_id;
 }
 
 static void log_frame(const struct whci_frame *f)
@@ -167,6 +178,11 @@ void module_link_poll(void)
             }
             if (WHCI_CODE(f.opcode) == WHCI_FELDD_STATE_ACK && f.len >= 1) {
                 last_ack_seq = f.payload[0];
+                app_id = 1;                       /* only our app acks pids */
+            } else if (WHCI_CODE(f.opcode) == WHCI_FELDD_READY && f.len >= 1) {
+                app_id = (f.payload[0] == APP_READY_MAX_PAYLOAD) ? 1 : -1;
+            } else if (app_id == 0) {
+                app_id = -1;                      /* 0xF0 traffic that isn't ours */
             }
         }
     }

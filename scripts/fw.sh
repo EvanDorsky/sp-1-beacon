@@ -11,6 +11,8 @@
 #   ./scripts/fw.sh flash      flash sp1_beacon.bin over the bootloader (rome, CLI)
 #   ./scripts/fw.sh dump       build the read-only full-flash dumper
 #   ./scripts/fw.sh monitordump [out.bin]  receive + verify a flash dump
+#   ./scripts/fw.sh release    build the PUBLISHABLE image (on-device radio
+#                              provisioning compiled in) + run the safety audit
 #   ./scripts/fw.sh clean      remove the build dir
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -45,6 +47,39 @@ do_dumpbuild(){ cd "$WS" || exit 1
     -DBOARD_ROOT="$BOARD_ROOT" \
     -DEXTRA_CONF_FILE="dump.conf" \
     -DEXTRA_DTC_OVERLAY_FILE="download.overlay"; }
+
+# RELEASE build: the normal beacon firmware + on-device radio provisioning
+# (CONFIG_SP1_PROVISION). Needs cybt_blobs.h WITH the SS identity template
+# (gen_blobs.py --ss-template). No download.overlay — the runtime DT already
+# runs the module UART flow-control-free.
+do_release(){ cd "$WS" || exit 1
+  [ -f "$APP/src/cybt_blobs.h" ] || {
+    echo "missing $APP/src/cybt_blobs.h — generate it first (gen_blobs.py)"; exit 1; }
+  grep -q CYBT_HAVE_SS_TEMPLATE "$APP/src/cybt_blobs.h" || {
+    echo "cybt_blobs.h lacks the SS template — regenerate with --ss-template <flash_dump.bin>"; exit 1; }
+  ZEPHYR_SDK_INSTALL_DIR="$SDK" west build -b sp1 -d build "$APP" -p -- \
+    -DBOARD_ROOT="$BOARD_ROOT" \
+    -DEXTRA_CONF_FILE="release.conf"; }
+
+# Safety audit on the packaged release image: the binary must be structurally
+# incapable of the one unrecoverable act (chip-erase). Tripwires, not proofs —
+# the real guarantee is that no chip-erase builder exists in the source (a
+# compile-time #error rejects it) — but they catch a regression loudly.
+do_audit(){
+  NM="$SDK/arm-zephyr-eabi/bin/arm-zephyr-eabi-nm"
+  grep -q '^CONFIG_SP1_PROVISION=y' "$BUILD/app/zephyr/.config" || {
+    echo "AUDIT FAIL: CONFIG_SP1_PROVISION not set in this build"; exit 1; }
+  bad=$("$NM" "$ELF" | grep -iE 'chip_?erase|ss_?write' || true)
+  [ -z "$bad" ] && bad_ok=1 || { echo "AUDIT FAIL: forbidden symbols:"; echo "$bad"; exit 1; }
+  python3 - "$BIN_OUT" <<'EOF' || exit 1
+import sys
+data = open(sys.argv[1], 'rb').read()
+off = data.find(b'\x01\xce\xff')   # a built CHIP_ERASE H4 command (01, opcode FFCE LE)
+if off != -1:
+    sys.exit(f"AUDIT FAIL: chip-erase command bytes 01 CE FF at offset {off:#x}")
+EOF
+  echo "audit OK: provisioning on, no chip-erase symbols, no 01 CE FF in the image"
+  shasum -a 256 "$BIN_OUT"; }
 
 do_bin(){
   [ -f "$ELF" ] || { echo "no ELF - run a build first"; exit 1; }
@@ -93,6 +128,7 @@ case "${1:-}" in
   dl)      do_dlbuild "download.conf"     && do_bin ;;   # module flasher, DRY-RUN
   dlarm)   do_dlbuild "download-arm.conf" && do_bin ;;   # module flasher, ARMED write
   dump)    do_dumpbuild && do_bin ;;                     # read-only full-flash dumper
+  release) do_release && do_bin && do_audit ;;           # publishable image + audit
   monitordump) shift
            out="${1:-$ROOT/sp1_flash_dump.bin}"
            if command -v uv >/dev/null 2>&1; then uv run "$ROOT/scripts/dump_recv.py" -o "$out"
