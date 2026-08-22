@@ -483,7 +483,10 @@ static void charge_standby_gate(uint32_t wake_reas)
             if (!usb_present()) {
                 power_off();                          /* battery + idle: off */
             }
-            led_idx(0, false);
+            /* NOTE: the ••-press indicator (LED 0) is cleared on the non-chase
+             * paths below, NOT here — the chase owns all 8 LEDs while active
+             * and only repaints on frame boundaries, so an every-tick clear
+             * here cut its first LED's frame short (bench-observed). */
             if (!adc_up) {
                 controls_init();
                 led_set_brightness(LED_BRIGHTNESS_DEFAULT);
@@ -547,9 +550,11 @@ static void charge_standby_gate(uint32_t wake_reas)
                         led_idx(i, false);
                     }
                 }
+                led_idx(0, false);         /* ••-press indicator clear (non-chase only) */
                 charge_gauge(battery_pct(last_raw), charging(), tick);
             }
 #else
+            led_idx(0, false);             /* ••-press indicator clear */
             charge_gauge(battery_pct(last_raw), charging(), tick);
 #endif
         }
