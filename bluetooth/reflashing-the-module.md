@@ -22,10 +22,10 @@ document is the how-to for doing that safely and reproducibly.
 The reflash procedure is **not** for a stock SP-1 owner. There are three very different audiences and
 you must know which one you are before touching hardware:
 
-- **Stock SP-1 owner (most people).** You get wireless BLE by flashing a `feldd` build that carries
-  the Bluetooth feature; `feldd` then drives and flashes the onboard module for you, on-device,
-  through the normal `feldd` flash flow. **You never run the procedures on this page directly.** Stop
-  here.
+- **Stock SP-1 owner (most people).** You get the BTHome beacon by flashing the released
+  `sp1_beacon.bin` (fw.sh release build) onto the nRF; the firmware then provisions the onboard
+  module for you, on-device — see *On-device provisioning in the release firmware* below. **You
+  never run the procedures on this page directly.** Stop here.
 - **Debugger-equipped SP-1 owner ("burner").** An SP-1 wired for SWD, used for firmware development.
   You can run the on-device module-reflash pipeline described below, under the burner-safety rules.
 - **Eval-board owner (CYBT-353027-EVAL).** You have Infineon's disposable evaluation board for this
@@ -37,6 +37,30 @@ the module's Static Section** (its factory BD_ADDR, crypto keys, and RF calibrat
 Engineering's stock module image is not public, so there is **no restore image** if you destroy it.
 Everything below is structured so that the destructive command is never issued and the write is
 confined to the application region.
+
+## On-device provisioning in the release firmware
+
+The published binary (`fw.sh release`, `CONFIG_SP1_PROVISION`) carries the flashing engine and the
+beacon module app embedded, so a user provisions the radio without any of the tooling on this page
+— feldd's shipping model:
+
+- **Detection.** On USB power the firmware probes which app the radio runs (our beacon app
+  identifies itself over WICED-HCI; feldd's app speaks the same private group differently; a stock
+  TE radio is silent). A radio not running our app gets a **sparkle** cue across all 8 LEDs.
+- **Consent.** Provisioning runs ONLY when the user holds **PLAY for 5 s with USB power present**
+  — explicit opt-in, never a silent auto-flash, never on battery.
+- **The gate.** Before writing, the live SS must match the known-good factory template
+  **byte-for-byte except the 6 BD_ADDR bytes** (`cybt_ss_template_ok`, template emitted by
+  `gen_blobs.py --ss-template` from a verified unit's dump). Any deviation → refuse, no write.
+  With a strict template, an unexpected unit is a *refusal*, not a brick.
+- **The write** is the same DS-only, SS-preserving Upgrade Download as everything on this page:
+  identity gate → minidriver → per-chunk floor-checked DS write → byte read-back verify → SS
+  re-check → warm boot. Progress shows as a blinking quarter-bar on the four side LEDs; success
+  pulses the side LEDs, failure pulses the track LEDs and the gesture is safely retryable (the
+  mask-ROM download mode is always re-enterable).
+- **The audit.** `fw.sh release` refuses to emit an image whose ELF/binary contains chip-erase
+  symbols or a built `01 CE FF` CHIP_ERASE command; there is no chip-erase builder in the source
+  and a compile-time `#error` rejects reintroducing one.
 
 ---
 
