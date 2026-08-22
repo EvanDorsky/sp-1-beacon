@@ -409,9 +409,13 @@ static int scan_controls(void)
 
 /* True once the radio is KNOWN to be running something other than our beacon
  * app (stock TE = silent, feldd = foreign 0xF0 traffic, older beacon build).
- * Drives the "needs provisioning" sparkle; cleared by a successful provision
+ * Drives the "needs provisioning" chase; cleared by a successful provision
  * or by our app identifying itself on a later wake. */
 static bool radio_not_ours;
+
+/* 1: run the chase whenever USB is in, regardless of radio state — a bench
+ * visual check of the pattern. Ship with 0. */
+#define CHASE_DEMO 0
 
 /* "Radio needs provisioning" cue: all 8 LEDs blink in ONE sequence chasing
  * TOWARDS the PLAY button (top right) — fader LEDs 1→4 (idx 0..3), then the
@@ -748,14 +752,16 @@ int main(void)
         }
 #endif /* CONFIG_SP1_PROVISION */
 
-        /* "Radio needs provisioning" chase toward PLAY: overrides the charge
-         * gauge until the radio is confirmed to run our app; accelerates while
-         * PLAY is held (the consent gesture in progress). */
+        /* Chase toward PLAY: runs while the radio needs provisioning, AND as
+         * live hold feedback whenever the consent gesture is in progress (PLAY
+         * held with USB in — even on an already-provisioned radio, since the
+         * gesture works there too). Accelerates with the hold. */
         static bool chasing;
-        if (radio_not_ours) {
+        bool play_held = bthome_clf_down(&clf, 0);
+        bool chase_on = radio_not_ours || (usb_now && (CHASE_DEMO || play_held));
+        if (chase_on) {
             chasing = true;
-            chase_tick(bthome_clf_down(&clf, 0)
-                           ? k_uptime_get() - clf.down_t[0] : 0);
+            chase_tick(play_held ? k_uptime_get() - clf.down_t[0] : 0);
         } else if (chasing) {
             chasing = false;
             for (int i = 0; i < LED_COUNT; i++) {
@@ -767,7 +773,7 @@ int main(void)
          * glanceable charge state while the device is powered on. Battery moves
          * slowly so it's sampled every GAUGE_BATT_MS; the blink is time-based so
          * its rate stays steady across the 8/40 ms loop cadence. */
-        if (!radio_not_ours && usb_present()) {
+        if (!chase_on && usb_present()) {
             int64_t gnow = k_uptime_get();
             if (gauge_batt_t < 0 || gnow - gauge_batt_t >= GAUGE_BATT_MS) {
                 gauge_batt_t = gnow;
