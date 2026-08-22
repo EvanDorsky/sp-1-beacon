@@ -1,15 +1,15 @@
 /*
- * bt_download.c — dev-only CYW20706 module flasher (see bt_download.h).
+ * bt_download.c — CYW20706 module flashing engine (see bt_download.h).
  *
- * The write-specific half of the flasher: identity gate, minidriver load, DS
- * dry-run, and (behind CONFIG_SP1_BT_DOWNLOAD_ARM) the DS write + read-back
- * verify. The low-level UART / download-mode entry / power-off recovery is
- * shared with the read-only dumper via bt_wire.c.
+ * One engine, two entries: the dev boot-mode flasher (CONFIG_SP1_BT_DOWNLOAD,
+ * write armed by CONFIG_SP1_BT_DOWNLOAD_ARM) and release on-device
+ * provisioning (CONFIG_SP1_PROVISION, bt_provision_run). Identity + SS
+ * template gate, minidriver load, DS plan, DS write + read-back verify, SS
+ * re-check, warm boot. The low-level UART / download-mode entry / power-off
+ * recovery is shared with the read-only dumper via bt_wire.c.
  *
- * NOT HARDWARE-VALIDATED for the write. The pure protocol/planning core is
- * host-tested and the read path is confirmed on hardware; the armed write is
- * gated behind CONFIG_SP1_BT_DOWNLOAD_ARM. Read bluetooth/reflashing-the-module.md
- * before running.
+ * The armed write is HARDWARE-VALIDATED (two DS writes on the keeper, SS
+ * byte-identical both times). Read bluetooth/reflashing-the-module.md first.
  */
 #include "bt_download.h"
 #include "bt_wire.h"
@@ -20,6 +20,20 @@
 #include <zephyr/sys/printk.h>
 
 #include "cybt_blobs.h"   /* generated, gitignored: cybt_minidriver[], cybt_ds_image[], addrs */
+
+#if defined(CONFIG_SP1_PROVISION) && !defined(CYBT_HAVE_SS_TEMPLATE)
+#error "CONFIG_SP1_PROVISION requires the SS identity template — regenerate cybt_blobs.h with gen_blobs.py --ss-template <known-good flash dump>"
+#endif
+
+/* Progress reporting for the provisioning caller's LED display (NULL for the
+ * dev boot mode, which narrates over the console instead). */
+static bt_prov_progress_t prov_cb;
+static void report(enum bt_prov_phase phase, int pct)
+{
+    if (prov_cb != NULL) {
+        prov_cb(phase, pct);
+    }
+}
 
 /* ---- SS identity gate (ROM-level READ_RAM, no minidriver) ---- */
 
@@ -74,6 +88,17 @@ static bool identity_gate(void)
         printk("DL: IDENTITY GATE FAILED (DS base != expected) — ABORT, no write\n");
         return false;
     }
+#ifdef CYBT_HAVE_SS_TEMPLATE
+    /* feldd's template-equality gate: the whole SS window must match the
+     * known-good factory template except the 6 BD_ADDR bytes. Any deviation
+     * refuses — never guess, never relocate. */
+    if (!cybt_ss_template_ok(ss1, SS_LEN, cybt_ss_template,
+                             sizeof(cybt_ss_template))) {
+        printk("DL: SS does not match the factory template — ABORT, no write\n");
+        return false;
+    }
+    printk("DL: SS template match (BD_ADDR-masked)\n");
+#endif
     printk("DL: identity gate OK\n");
     return true;
 }
@@ -107,6 +132,7 @@ static bool load_minidriver(void)
             printk("DL: minidriver WRITE_RAM failed at +0x%X\n", off);
             return false;
         }
+        report(BT_PROV_PREP, (int)(20 + off * 80 / total));   /* prep 20..100 */
     }
     int ln = cybt_cmd_launch_ram(cmd, sizeof(cmd), CYBT_BLOB_MINIDRIVER_LAUNCH);
     if (!bt_wire_cmd_cc(cmd, ln, CYBT_OP_LAUNCH_RAM, NULL, 0, NULL, 500)) {
@@ -143,7 +169,7 @@ static bool ds_plan(void)
     return true;
 }
 
-#ifdef CONFIG_SP1_BT_DOWNLOAD_ARM
+#if defined(CONFIG_SP1_BT_DOWNLOAD_ARM) || defined(CONFIG_SP1_PROVISION)
 static bool ds_write_and_verify(void)
 {
     uint32_t total = sizeof(cybt_ds_image);
@@ -165,6 +191,7 @@ static bool ds_write_and_verify(void)
         if ((off % 4096) == 0) {
             printk("DL: wrote 0x%08X (%u/%u)\n", base + off, off, total);
         }
+        report(BT_PROV_WRITE, (int)(off * 100 / total));
     }
     printk("DL: DS write complete, verifying by read-back...\n");
     /* Read-back verify: byte-for-byte compare (findings.md's proof method). */
@@ -183,12 +210,37 @@ static bool ds_write_and_verify(void)
                 return false;
             }
         }
+        report(BT_PROV_VERIFY, (int)(off * 100 / total));
     }
     printk("DL: read-back MATCH\n");
     return true;
 }
-#endif /* CONFIG_SP1_BT_DOWNLOAD_ARM */
 
+/* SS must survive an armed write byte-identical in what it declares — re-read
+ * and re-check the DS base. Returns false on the (never-yet-seen) violation. */
+static bool ss_recheck(void)
+{
+    uint8_t ss[SS_LEN];
+    uint32_t base;
+
+    if (read_ss(ss) && cybt_ss_ds_base(ss, SS_LEN, &base) && base == CYBT_DS_BASE) {
+        printk("DL: SS intact after write (DS base still 0x%08X)\n", base);
+        return true;
+    }
+    printk("DL: WARNING — SS re-check failed after write\n");
+    return false;
+}
+
+/* Warm-boot the module out of download mode into the freshly written app. */
+static void warm_boot(void)
+{
+    uint8_t cmd[16];
+    int n = cybt_cmd_launch_ram(cmd, sizeof(cmd), CYBT_LAUNCH_REBOOT);
+    bt_wire_tx(cmd, n);
+}
+#endif /* CONFIG_SP1_BT_DOWNLOAD_ARM || CONFIG_SP1_PROVISION */
+
+#ifdef CONFIG_SP1_BT_DOWNLOAD
 void bt_download_run(void)
 {
     /* Bring up the USB-CDC console (no SWD/RTT) and give a host a couple of
@@ -222,22 +274,8 @@ void bt_download_run(void)
     if (!ds_write_and_verify()) {
         bt_wire_halt("DL: halted (write/verify failed — re-enter download and retry).");
     }
-    /* SS must survive byte-identical. */
-    {
-        uint8_t ss[SS_LEN];
-        uint32_t base;
-        if (read_ss(ss) && cybt_ss_ds_base(ss, SS_LEN, &base) && base == CYBT_DS_BASE) {
-            printk("DL: SS intact after write (DS base still 0x%08X)\n", base);
-        } else {
-            printk("DL: WARNING — SS re-check failed after write\n");
-        }
-    }
-    /* Warm-boot into the freshly written app. */
-    {
-        uint8_t cmd[16];
-        int n = cybt_cmd_launch_ram(cmd, sizeof(cmd), CYBT_LAUNCH_REBOOT);
-        bt_wire_tx(cmd, n);
-    }
+    (void)ss_recheck();
+    warm_boot();
     printk("DL: DONE — module warm-booted into the new app.\n");
 #else
     printk("DL: DRY-RUN complete — identity + plan OK, nothing written.\n");
@@ -246,3 +284,51 @@ void bt_download_run(void)
 
     bt_wire_halt("DL: halted.");
 }
+#endif /* CONFIG_SP1_BT_DOWNLOAD */
+
+#ifdef CONFIG_SP1_PROVISION
+/* On-device provisioning, callable from the normal control loop (see
+ * bt_download.h). The same engine as the dev flasher, with the write always
+ * compiled, the SS template gate always enforced, and failure RETURNING so
+ * the caller keeps its •• power-off escape (every step is timeout-bounded, so
+ * this cannot spin forever; a true hang WDT-resets, recoverable). */
+bool bt_provision_run(bt_prov_progress_t progress)
+{
+    bool ok = false;
+
+    prov_cb = progress;
+    report(BT_PROV_PREP, 0);
+    printk("\n=== sp1-beacon RADIO PROVISIONING (DS-only, SS-preserving) ===\n");
+    printk("DL: DS base 0x%08X, floor 0x%08X. No chip-erase compiled.\n",
+           CYBT_DS_BASE, CYBT_DS_FLOOR);
+
+    bt_wire_init();                  /* takes over the module UART from module_link */
+    if (!bt_wire_enter_download()) {
+        printk("DL: provisioning aborted (download-mode entry failed)\n");
+        goto out;
+    }
+    report(BT_PROV_PREP, 10);
+    if (!identity_gate()) {          /* incl. the SS template-equality gate */
+        printk("DL: provisioning REFUSED (identity/template gate)\n");
+        goto out;
+    }
+    report(BT_PROV_PREP, 20);
+    if (!load_minidriver() || !ds_plan()) {
+        printk("DL: provisioning aborted before any write\n");
+        goto out;
+    }
+    if (!ds_write_and_verify()) {
+        printk("DL: provisioning write/verify FAILED — safe to retry the gesture\n");
+        goto out;
+    }
+    if (!ss_recheck()) {
+        goto out;                    /* violated invariant: loud stop, no warm boot */
+    }
+    warm_boot();
+    printk("DL: provisioning DONE — module warm-booted into the beacon app.\n");
+    ok = true;
+out:
+    prov_cb = NULL;
+    return ok;
+}
+#endif /* CONFIG_SP1_PROVISION */

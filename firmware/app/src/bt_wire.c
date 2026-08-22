@@ -194,7 +194,7 @@ void bt_wire_power_off(void)
 void bt_wire_halt(const char *msg)
 {
     printk("%s\n", msg);
-    printk("DL: hold •• (5 s) or Track 1+4 to power off "
+    printk("DL: hold •• (2 s) or Track 1+4 to power off "
            "(hold 1+4 + plug USB at boot for DFU).\n");
     /* ESCAPE HATCH: dev builds run no control loop, so poll •• (direct GPIO) +
      * the Track 1+4 combo (TRACKS ladder) and power off on a hold. */
@@ -206,7 +206,7 @@ void bt_wire_halt(const char *msg)
         int func_held = (nrf_gpio_pin_read(SP1_FUNC_BTN) == 0);
         int trk_held  = buttons_in_dfu_band_pure(controls_read_raw(0));
         led_pin(SP1_TRACK_LED1, func_held || trk_held);   /* held-gesture feedback */
-        if (func_held) { if (++func_cnt >= 50) bt_wire_power_off(); } else { func_cnt = 0; }  /* ~5 s */
+        if (func_held) { if (++func_cnt >= 20) bt_wire_power_off(); } else { func_cnt = 0; }  /* ~2 s, matches runtime FUNC_OFF_MS */
         if (trk_held)  { if (++trk_cnt  >= 12) bt_wire_power_off(); } else { trk_cnt  = 0; }  /* ~1.2 s */
         k_msleep(100);
     }

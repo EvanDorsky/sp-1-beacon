@@ -29,3 +29,6 @@ target_sources(app PRIVATE
 # exclusive (Kconfig), so bt_wire.c is added at most once.
 target_sources_ifdef(CONFIG_SP1_BT_DOWNLOAD app PRIVATE src/bt_wire.c src/bt_download.c)
 target_sources_ifdef(CONFIG_SP1_BT_DUMP     app PRIVATE src/bt_wire.c src/bt_dump.c)
+# RELEASE on-device provisioning: the same engine, compiled INTO the normal
+# firmware (mutually exclusive with the dev modes via Kconfig depends).
+target_sources_ifdef(CONFIG_SP1_PROVISION   app PRIVATE src/bt_wire.c src/bt_download.c)

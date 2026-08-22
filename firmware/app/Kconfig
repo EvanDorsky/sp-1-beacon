@@ -44,4 +44,19 @@ config SP1_BT_DOWNLOAD_ARM
 	  write is still DS-only and SS-preserving (never chip-erase). This is the
 	  explicit human arm for the first destructive touch of the module flash.
 
+config SP1_PROVISION
+	bool "On-device radio provisioning in the release firmware"
+	depends on !SP1_BT_DUMP && !SP1_BT_DOWNLOAD
+	default n
+	help
+	  Compile the CYW20706 flashing engine + the embedded beacon module app
+	  (generated src/cybt_blobs.h, which must include the SS identity template:
+	  gen_blobs.py --ss-template) INTO the normal beacon firmware, so a
+	  published binary can provision a radio in any state (stock TE, feldd, or
+	  an older beacon app) on-device — feldd's model. Explicit opt-in only:
+	  the user holds PLAY for 5 s with USB power present. The write is gated by
+	  the full SS template-equality check (a deviating unit is REFUSED, never
+	  written), is DS-only and SS-preserving, and there is NO chip-erase path
+	  anywhere in the subsystem. See bluetooth/reflashing-the-module.md.
+
 source "Kconfig.zephyr"
