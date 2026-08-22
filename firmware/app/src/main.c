@@ -416,15 +416,20 @@ static bool radio_not_ours;
 /* "Radio needs provisioning" cue: all 8 LEDs blink in ONE sequence chasing
  * TOWARDS the PLAY button (top right) — fader LEDs 1→4 (idx 0..3), then the
  * charge LEDs climbing to the full-charge light (idx 4..7), pointing the user
- * at the gesture. While PLAY is held the chase speeds up, as live feedback
- * that the 5 s consent hold is registering. */
-static void chase_tick(bool fast)
+ * at the gesture. While PLAY is held the chase accelerates smoothly with the
+ * hold — 150 ms/step down to 50 ms/step across the 5 s consent hold — as live
+ * feedback that the gesture is registering. held_ms = 0 when PLAY is up. */
+static void chase_tick(int64_t held_ms)
 {
     static int64_t frame_t;
     static int step;
     int64_t now = k_uptime_get();
 
-    if (now - frame_t < (fast ? 55 : 150)) {
+    int64_t period = 150 - held_ms / 50;     /* -2 ms per 100 ms of hold */
+    if (period < 50) {
+        period = 50;                         /* floor reached right at ~5 s */
+    }
+    if (now - frame_t < period) {
         return;
     }
     frame_t = now;
@@ -749,7 +754,8 @@ int main(void)
         static bool chasing;
         if (radio_not_ours) {
             chasing = true;
-            chase_tick(bthome_clf_down(&clf, 0));
+            chase_tick(bthome_clf_down(&clf, 0)
+                           ? k_uptime_get() - clf.down_t[0] : 0);
         } else if (chasing) {
             chasing = false;
             for (int i = 0; i < LED_COUNT; i++) {
