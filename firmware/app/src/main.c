@@ -178,7 +178,7 @@ static void boot_signature(void)
 #define FADER_MIN_MS    50      /* min gap between fader packets: sliding streams
                                  * ~5 updates/s; button events always take priority */
 #define GAUGE_BATT_MS   10000   /* charge-gauge battery sample cadence (USB only) */
-#define FUNC_OFF_MS     2000    /* •• held this long powers the device off */
+#define FUNC_OFF_MS     5000    /* •• held this long powers the device off */
 #define FUNC_TAP_MS     1000    /* •• released before this = a status tap, not a hold */
 
 enum bc_state { BC_IDLE, BC_WAKE, BC_ON };
@@ -366,7 +366,7 @@ static bool radio_not_ours;
 
 /* 1: run the chase whenever USB is in, regardless of radio state — a bench
  * visual check of the pattern. Ship with 0. */
-#define CHASE_DEMO 0
+#define CHASE_DEMO 1
 
 /* "Radio needs provisioning" cue: all 8 LEDs blink in ONE sequence chasing
  * TOWARDS the PLAY button (top right) — fader LEDs 1→4 (idx 0..3), then the
@@ -419,7 +419,9 @@ static void radio_probe(void)
 }
 
 /* Provisioning progress on the 4 side LEDs: PREP = all four blink together;
- * WRITE/VERIFY = a bar (full quarters solid, the active quarter blinking).
+ * WRITE = a bar filling upward (full quarters solid, the active quarter
+ * blinking); VERIFY = the same bar filling back DOWN the other way, so the
+ * copy-over and the read-back visibly run in opposite directions.
  * Called from inside the flash engine every chunk, so the blink stays live. */
 static void prov_led_progress(enum bt_prov_phase phase, int pct)
 {
@@ -433,7 +435,9 @@ static void prov_led_progress(enum bt_prov_phase phase, int pct)
     }
     int q = pct / 25;                             /* 0..4 full quarters */
     for (int i = 0; i < 4; i++) {
-        led_idx(4 + i, i < q ? true : (i == q ? blink : false));
+        /* write: bar grows 4->7; verify: mirrored, grows 7->4 */
+        int led = (phase == BT_PROV_VERIFY) ? 7 - i : 4 + i;
+        led_idx(led, i < q ? true : (i == q ? blink : false));
     }
 }
 #endif /* CONFIG_SP1_PROVISION */
