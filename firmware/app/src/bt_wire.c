@@ -17,6 +17,7 @@
 #include <zephyr/device.h>
 #include <zephyr/devicetree.h>
 #include <zephyr/drivers/uart.h>
+#include <zephyr/pm/device.h>
 #include <zephyr/sys/printk.h>
 #include <hal/nrf_gpio.h>
 #include <nrfx.h>
@@ -63,6 +64,12 @@ void bt_wire_init(void)
         printk("DL: uart0 NOT READY\n");
         return;
     }
+#ifdef CONFIG_PM_DEVICE
+    /* The runtime link suspends the UARTE while the module is held in reset;
+     * a provisioning session can start from that state. Harmless when the
+     * device was never suspended (returns -EALREADY). */
+    (void)pm_device_action_run(uart, PM_DEVICE_ACTION_RESUME);
+#endif
     uart_irq_callback_user_data_set(uart, dl_uart_isr, NULL);
     uart_irq_rx_enable(uart);
 }

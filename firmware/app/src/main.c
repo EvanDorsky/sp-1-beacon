@@ -366,7 +366,7 @@ static bool radio_not_ours;
 
 /* 1: run the chase whenever USB is in, regardless of radio state — a bench
  * visual check of the pattern. Ship with 0. */
-#define CHASE_DEMO 1
+#define CHASE_DEMO 0
 
 /* "Radio needs provisioning" cue: all 8 LEDs blink in ONE sequence chasing
  * TOWARDS the PLAY button (top right) — fader LEDs 1→4 (idx 0..3), then the
@@ -503,7 +503,7 @@ static void charge_standby_gate(uint32_t wake_reas)
             }
             int64_t now = k_uptime_get();
             controls_rail(1);              /* sample PLAY off the tracks ladder */
-            k_busy_wait(2000);
+            k_usleep(2000);                /* sleep the settle (see the idle scan) */
             int play = buttons_decode_tracks_pure(controls_read_raw(0)) == 0;
             controls_rail(0);
             if (play) {
@@ -670,7 +670,9 @@ int main(void)
              * rail for power. Settle only when the rail was just raised. */
             if (!idle_rail_on) {
                 controls_rail(1);
-                k_busy_wait(RAIL_SETTLE_US);
+                k_usleep(RAIL_SETTLE_US);   /* SLEEP the settle, don't spin: 2 ms of
+                                             * CPU burn per 40 ms idle tick was ~5%
+                                             * active duty doing nothing */
                 idle_rail_on = true;
             }
             scan_controls();

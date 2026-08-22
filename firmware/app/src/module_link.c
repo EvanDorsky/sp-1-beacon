@@ -12,6 +12,7 @@
 #include <zephyr/device.h>
 #include <zephyr/devicetree.h>
 #include <zephyr/drivers/uart.h>
+#include <zephyr/pm/device.h>
 #include <zephyr/sys/printk.h>
 #include <hal/nrf_gpio.h>
 
@@ -71,6 +72,26 @@ static void uart_isr(const struct device *dev, void *user_data)
     }
 }
 
+/* Power the module-link UARTE itself up/down with the module. While the
+ * CYW20706 is held in reset (the SP-1's usual state) its TX line is dead, but
+ * an enabled UARTE receiver keeps its clock request asserted around the clock
+ * — pure idle drain. Suspend the peripheral whenever the module is off; every
+ * power-on resumes it BEFORE the reset release, so no boot chatter is lost. */
+static void link_uart_active(bool on)
+{
+    if (on) {
+#ifdef CONFIG_PM_DEVICE
+        (void)pm_device_action_run(uart, PM_DEVICE_ACTION_RESUME);
+#endif
+        uart_irq_rx_enable(uart);
+    } else {
+        uart_irq_rx_disable(uart);
+#ifdef CONFIG_PM_DEVICE
+        (void)pm_device_action_run(uart, PM_DEVICE_ACTION_SUSPEND);
+#endif
+    }
+}
+
 int module_link_init(void)
 {
     /* Module held in reset (BT off) and CTS parked HIGH (never strap) from the
@@ -87,7 +108,7 @@ int module_link_init(void)
         return -1;
     }
     uart_irq_callback_user_data_set(uart, uart_isr, NULL);
-    uart_irq_rx_enable(uart);
+    link_uart_active(false);   /* module in reset: sleep the UART until a wake */
     return 0;
 }
 
@@ -100,6 +121,7 @@ void module_link_power(bool on)
         /* Normal-boot sequence: CTS HIGH across the reset release (the LOW
          * strap would select download mode), hold reset low a beat, release,
          * then only after the strap window drop CTS so the app may transmit. */
+        link_uart_active(true);            /* UART awake before the module is */
         nrf_gpio_pin_set(MODULE_CTS);
         nrf_gpio_pin_clear(MODULE_RSTN);
         k_msleep(10);
@@ -120,6 +142,7 @@ void module_link_power(bool on)
         nrf_gpio_pin_set(MODULE_CTS);       /* park the strap line high */
         nrf_gpio_pin_clear(MODULE_RSTN);    /* hold in reset = BT off */
         state = MODULE_OFF;
+        link_uart_active(false);            /* nothing to hear: sleep the UART */
         printk("BT: module held in reset\n");
     }
 }
