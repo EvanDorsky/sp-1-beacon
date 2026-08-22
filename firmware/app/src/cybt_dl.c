@@ -154,3 +154,21 @@ bool cybt_ss_gate_ok(const uint8_t *ss, uint32_t ss_len)
     }
     return base == CYBT_DS_BASE;
 }
+
+bool cybt_ss_template_ok(const uint8_t *ss, uint32_t ss_len,
+                         const uint8_t *tmpl, uint32_t tmpl_len)
+{
+    if (ss == NULL || tmpl == NULL || tmpl_len == 0 || ss_len < tmpl_len) {
+        return false;
+    }
+    for (uint32_t i = 0; i < tmpl_len; i++) {
+        if (i >= CYBT_SS_BDADDR_OFF &&
+            i < CYBT_SS_BDADDR_OFF + CYBT_SS_BDADDR_LEN) {
+            continue;               /* the per-unit BD_ADDR bytes */
+        }
+        if (ss[i] != tmpl[i]) {
+            return false;
+        }
+    }
+    return true;
+}

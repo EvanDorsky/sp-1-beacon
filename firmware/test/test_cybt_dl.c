@@ -174,6 +174,43 @@ static void test_ss_gate(void)
     CHECK(!cybt_ss_gate_ok(overrun, sizeof(overrun)));
 }
 
+/* Template-equality gate: byte-identical except the 6 BD_ADDR bytes at 21. */
+static void test_ss_template(void)
+{
+    uint8_t tmpl[64], ss[64];
+    for (int i = 0; i < 64; i++) {
+        tmpl[i] = (uint8_t)(i * 7u + 3u);
+    }
+    memset(tmpl + CYBT_SS_BDADDR_OFF, 0x00, CYBT_SS_BDADDR_LEN);  /* masked in template */
+
+    memcpy(ss, tmpl, 64);
+    CHECK(cybt_ss_template_ok(ss, 64, tmpl, 64));                 /* identical passes */
+
+    memcpy(ss + CYBT_SS_BDADDR_OFF, "\xC0\x5D\x89\x12\x34\x56", 6);
+    CHECK(cybt_ss_template_ok(ss, 64, tmpl, 64));                 /* BD_ADDR free */
+
+    ss[0] ^= 1;
+    CHECK(!cybt_ss_template_ok(ss, 64, tmpl, 64));                /* header byte -> refuse */
+    ss[0] ^= 1;
+
+    ss[63] ^= 1;
+    CHECK(!cybt_ss_template_ok(ss, 64, tmpl, 64));                /* trailing byte -> refuse */
+    ss[63] ^= 1;
+
+    ss[CYBT_SS_BDADDR_OFF + CYBT_SS_BDADDR_LEN] ^= 1;             /* just past the mask */
+    CHECK(!cybt_ss_template_ok(ss, 64, tmpl, 64));
+    ss[CYBT_SS_BDADDR_OFF + CYBT_SS_BDADDR_LEN] ^= 1;
+
+    ss[CYBT_SS_BDADDR_OFF - 1] ^= 1;                              /* just before the mask */
+    CHECK(!cybt_ss_template_ok(ss, 64, tmpl, 64));
+    ss[CYBT_SS_BDADDR_OFF - 1] ^= 1;
+
+    CHECK(!cybt_ss_template_ok(ss, 32, tmpl, 64));                /* short SS refused */
+    CHECK(!cybt_ss_template_ok(NULL, 64, tmpl, 64));
+    CHECK(!cybt_ss_template_ok(ss, 64, NULL, 64));
+    CHECK(!cybt_ss_template_ok(ss, 64, tmpl, 0));
+}
+
 int main(void)
 {
     test_cmd_hci_reset();
@@ -187,6 +224,7 @@ int main(void)
     test_ds_window_guard();
     test_ss_ds_base();
     test_ss_gate();
+    test_ss_template();
     if (g_fail) {
         printf("test_cybt_dl: FAIL\n");
         return 1;

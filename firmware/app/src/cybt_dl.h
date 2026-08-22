@@ -90,7 +90,7 @@ int cybt_cmd_launch_ram(uint8_t *out, size_t cap, uint32_t addr);
  * A command-complete event payload (as deframed by whci_parser: the bytes
  * AFTER the 04 0E len header) looks like: 01 op_lo op_hi status [data...].
  * Returns true if it is a command-complete for `opcode` with status 0x00; on
- * success sets *data/*dlen to the trailing data (may be empty). */
+ * success sets *data and *dlen to the trailing data (may be empty). */
 bool cybt_cc_ok(const uint8_t *evt_payload, uint16_t len, uint16_t opcode,
                 const uint8_t **data, uint16_t *dlen);
 
@@ -108,5 +108,15 @@ bool cybt_ss_ds_base(const uint8_t *ss, uint32_t ss_len, uint32_t *out_base);
  * DS base equals CYBT_DS_BASE (compile-time). This is compare-only — it can
  * refuse, never redirect. Returns true = safe to proceed. */
 bool cybt_ss_gate_ok(const uint8_t *ss, uint32_t ss_len);
+
+/* Template-equality gate (feldd's provisioning model): the live SS must match a
+ * known-good factory template byte-for-byte, EXCEPT the 6 per-unit BD_ADDR
+ * bytes (the type-0x40 record payload at offset 21), which are the only bytes a
+ * unit may differ in. Any other deviation -> refuse (never guess, never
+ * relocate). Pure; both buffers must cover tmpl_len bytes. */
+#define CYBT_SS_BDADDR_OFF 21u
+#define CYBT_SS_BDADDR_LEN 6u
+bool cybt_ss_template_ok(const uint8_t *ss, uint32_t ss_len,
+                         const uint8_t *tmpl, uint32_t tmpl_len);
 
 #endif /* CYBT_DL_H */
