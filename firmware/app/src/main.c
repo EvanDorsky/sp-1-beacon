@@ -218,7 +218,13 @@ static void boot_signature(void)
                                  * receiver's WiFi-coex scan gaps (bench-tested) */
 #define EVENT_CAP_MS    1000    /* hard cap from first send: a module that stops
                                  * acking can't wedge the event queue forever */
-#define FADER_MIN_MS    200     /* min gap between fader packets: sliding streams
+#define FADER_RAW_FULL  3650    /* raw ADC at full fader deflection. The 3.6 V
+                                 * ADC full-scale (gain 1/6, 0.6 V internal ref)
+                                 * exceeds the ~3.3 V rail, so raw tops out
+                                 * ~3700 (231 after >>4); rescale so the top of
+                                 * travel reliably reads 255. Bench: •• tap
+                                 * showed 231 max, 2026-08-21. */
+#define FADER_MIN_MS    50      /* min gap between fader packets: sliding streams
                                  * ~5 updates/s; button events always take priority */
 #define GAUGE_BATT_MS   10000   /* charge-gauge battery sample cadence (USB only) */
 #define FUNC_OFF_MS     2000    /* •• held this long powers the device off */
@@ -385,7 +391,8 @@ static int scan_controls(void)
         for (int i = 0; i < 4; i++) {
             int raw = controls_read_raw(2 + i);
             if (raw >= 0) {
-                fader[i] = (uint8_t)(raw >> 4);
+                int v = raw * 255 / FADER_RAW_FULL;   /* rail-calibrated 0..255 */
+                fader[i] = (uint8_t)(v > 255 ? 255 : v);
             }
         }
         if (!fader_seeded) {               /* first clean read: baseline, not a gesture */
