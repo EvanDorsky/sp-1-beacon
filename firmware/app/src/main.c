@@ -413,22 +413,24 @@ static int scan_controls(void)
  * or by our app identifying itself on a later wake. */
 static bool radio_not_ours;
 
-/* Sparkle: a random twinkle over all 8 LEDs, the "radio needs provisioning"
- * cue. Frame every ~90 ms from a tiny xorshift; ~2 sparse LEDs lit at a time. */
-static void sparkle_tick(void)
+/* "Radio needs provisioning" cue: all 8 LEDs blink in ONE sequence chasing
+ * TOWARDS the PLAY button (top right) — fader LEDs 1→4 (idx 0..3), then the
+ * charge LEDs climbing to the full-charge light (idx 4..7), pointing the user
+ * at the gesture. While PLAY is held the chase speeds up, as live feedback
+ * that the 5 s consent hold is registering. */
+static void chase_tick(bool fast)
 {
-    static uint32_t rng = 0xC0FFEE21u;
     static int64_t frame_t;
+    static int step;
     int64_t now = k_uptime_get();
 
-    if (now - frame_t < 90) {
+    if (now - frame_t < (fast ? 55 : 150)) {
         return;
     }
     frame_t = now;
-    rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;
-    uint32_t mask = rng & (rng >> 8) & 0xFF;      /* AND thins to ~2 bits */
+    step = (step + 1) % LED_COUNT;
     for (int i = 0; i < LED_COUNT; i++) {
-        led_idx(i, (mask >> i) & 1u);
+        led_idx(i, i == step);
     }
 }
 
@@ -741,14 +743,15 @@ int main(void)
         }
 #endif /* CONFIG_SP1_PROVISION */
 
-        /* "Radio needs provisioning" sparkle: overrides the charge gauge until
-         * the radio is confirmed to run our app. */
-        static bool sparkling;
+        /* "Radio needs provisioning" chase toward PLAY: overrides the charge
+         * gauge until the radio is confirmed to run our app; accelerates while
+         * PLAY is held (the consent gesture in progress). */
+        static bool chasing;
         if (radio_not_ours) {
-            sparkling = true;
-            sparkle_tick();
-        } else if (sparkling) {
-            sparkling = false;
+            chasing = true;
+            chase_tick(bthome_clf_down(&clf, 0));
+        } else if (chasing) {
+            chasing = false;
             for (int i = 0; i < LED_COUNT; i++) {
                 led_idx(i, false);
             }

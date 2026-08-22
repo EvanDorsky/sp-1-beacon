@@ -46,7 +46,9 @@ beacon module app embedded, so a user provisions the radio without any of the to
 
 - **Detection.** On USB power the firmware probes which app the radio runs (our beacon app
   identifies itself over WICED-HCI; feldd's app speaks the same private group differently; a stock
-  TE radio is silent). A radio not running our app gets a **sparkle** cue across all 8 LEDs.
+  TE radio is silent). A radio not running our app gets an **8-LED chase toward the PLAY button**
+  (fader LEDs 1→4, then the charge LEDs up to full) — pointing at the gesture; the chase speeds up
+  while PLAY is held, as feedback that the consent hold is registering.
 - **Consent.** Provisioning runs ONLY when the user holds **PLAY for 5 s with USB power present**
   — explicit opt-in, never a silent auto-flash, never on battery.
 - **The gate.** Before writing, the live SS must match the known-good factory template
