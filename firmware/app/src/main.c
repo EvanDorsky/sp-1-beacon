@@ -726,12 +726,24 @@ int main(void)
 
             /* Wake on a button (even a not-yet-debounced press on the rail; the
              * SPECIFIC button is left to the debounced scan during the module's
-             * boot) — or on a fader moved past the deadband, which gets its own
-             * fader packet once the module is up. */
+             * boot) — or on a fader moved past the deadband. The fader wake
+             * additionally requires TWO CONSECUTIVE dirty idle scans: a single
+             * noisy ADC read past the deadband was enough to fire up the radio,
+             * broadcast the outlier, then wake AGAIN when the next read settled
+             * back (bench: phantom wakes from ~1-count jitter). A real slide is
+             * dirty for many scans running, so this costs one idle tick (~40 ms)
+             * of wake latency; a one-sample glitch never survives it. */
+            static int fader_dirty_scans;
             if (loaded || any_down() || evq_len > 0) {
+                fader_dirty_scans = 0;
                 bc_wake("button");
             } else if (fader_dirty()) {
-                bc_wake("fader");
+                if (++fader_dirty_scans >= 2) {
+                    fader_dirty_scans = 0;
+                    bc_wake("fader");
+                }
+            } else {
+                fader_dirty_scans = 0;
             }
         } else {
             scan_controls();
