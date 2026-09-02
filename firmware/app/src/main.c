@@ -65,6 +65,41 @@ static void ensure_wdt_started(void)
     NRF_WDT->TASKS_START = 1u;
 }
 
+/* ---- quiesce the stem-player peripherals this firmware never uses ----
+ *
+ * The board carries a whole audio/storage subsystem the beacon never touches,
+ * and disabling the DRIVERS (CONFIG_I2C/I2S=n) never told the CHIPS to sleep:
+ * each one sits in whatever state power-up/the TE bootloader left it, drawing
+ * current around the clock — the standing drain behind the ~40-day battery
+ * life measured on the bench. Park every one of them at boot, LOW:
+ *
+ *   P0.13  3.072 MHz audio-MCLK oscillator, enable ACTIVE-HIGH -> disabled
+ *   P0.09  TAS2505 speaker amp   /RESET (active-low) -> held in reset
+ *   P0.15  CS42L42 headphone codec /RESET (active-low) -> held in reset
+ *   P0.14  eMMC VCCQ power switch, HIGH = on -> rail OFF
+ *   P0.06/07/08 + P1.08  eMMC CLK/DAT0/CMD/RST -> driven LOW so nothing
+ *          back-powers the unpowered card through its I/O ESD diodes
+ *
+ * Polarities verified against the stem-player firmware that drives these
+ * chips (marisko app/src/codec.c + emmc.c). None of these pins collide with
+ * anything the beacon uses. Driven GPIO state is retained through SYSTEM_OFF,
+ * so this quiesces the "off and charging" state too, not just idle. */
+static void board_quiesce(void)
+{
+    static const uint8_t p0_low[] = { 6, 7, 8, 9, 13, 14, 15 };
+
+    for (unsigned int i = 0; i < sizeof(p0_low); i++) {
+        uint32_t pin = NRF_GPIO_PIN_MAP(0, p0_low[i]);
+        nrf_gpio_pin_clear(pin);
+        nrf_gpio_cfg_output(pin);
+        nrf_gpio_pin_clear(pin);
+    }
+    uint32_t emmc_rst = NRF_GPIO_PIN_MAP(1, 8);
+    nrf_gpio_pin_clear(emmc_rst);
+    nrf_gpio_cfg_output(emmc_rst);
+    nrf_gpio_pin_clear(emmc_rst);
+}
+
 /* ---- BQ24232 charger (feldd/looper-verified: /CE low or the cell never
  * charges and the device browns out at random) ---- */
 
@@ -605,6 +640,10 @@ int main(void)
      * SYSTEM_OFF, so the module can never advertise while "off and charging". */
     nrf_gpio_cfg_output(NRF_GPIO_PIN_MAP(0, 10));
     nrf_gpio_pin_clear(NRF_GPIO_PIN_MAP(0, 10));
+
+    /* Same first-instant rule for the unused audio/storage chips: quiesced
+     * before the gate can SYSTEM_OFF, retained through it. */
+    board_quiesce();
 
     charger_init();
 
