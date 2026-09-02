@@ -210,8 +210,11 @@ static void boot_signature(void)
                                  * ~3700 (231 after >>4); rescale so the top of
                                  * travel reliably reads 255. Bench: •• tap
                                  * showed 231 max, 2026-08-21. */
-#define FADER_MIN_MS    50      /* min gap between fader packets: sliding streams
-                                 * ~5 updates/s; button events always take priority */
+#define FADER_MIN_MS    25      /* min gap between fader packets while sliding —
+                                 * slightly faster than the module's 30 ms adv
+                                 * interval so every advertisement carries a
+                                 * near-current value; button events always
+                                 * take priority */
 #define GAUGE_BATT_MS   10000   /* charge-gauge battery sample cadence (USB only) */
 #define FUNC_OFF_MS     5000    /* •• held this long powers the device off */
 #define FUNC_TAP_MS     1000    /* •• released before this = a status tap, not a hold */
