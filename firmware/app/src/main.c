@@ -74,35 +74,26 @@ static void ensure_wdt_started(void)
  * life measured on the bench. Park every one of them at boot, LOW:
  *
  *   P0.13  3.072 MHz audio-MCLK oscillator, enable ACTIVE-HIGH -> disabled
- *   P0.14  eMMC VCCQ power switch, HIGH = on -> rail OFF
- *   P0.06/07/08 + P1.08  eMMC CLK/DAT0/CMD/RST -> driven LOW so nothing
- *          back-powers the unpowered card through its I/O ESD diodes
  *
- * The codec /RESET holds (TAS2505 P0.09, CS42L42 P0.15) were REVERTED after a
- * bench soak went the wrong way: the codecs' power-on register defaults are
- * already powered-down (feldd ships the whole fleet with these lines untouched
- * and floating), so holding reset won ~nothing — while likely burning current
- * through the boards' reset pull-ups around the clock. Left untouched = the
- * feldd-proven state. The eMMC quiesce stays pending its own soak verdict.
- *
- * Polarities verified against the stem-player firmware that drives these
- * chips (marisko app/src/codec.c + emmc.c). None of these pins collide with
- * anything the beacon uses. Driven GPIO state is retained through SYSTEM_OFF,
- * so this quiesces the "off and charging" state too, not just idle. */
+ * That is deliberately ALL that's left. The first version also held both codec
+ * /RESETs low (TAS2505 P0.09, CS42L42 P0.15), cut the eMMC's VCCQ (P0.14) and
+ * parked its lines (P0.06/07/08, P1.08) — and a bench soak got dramatically
+ * WORSE (~10%/day vs the ~2.5%/day baseline): the held lines likely burned the
+ * boards' pull-ups around the clock, and cutting VCCQ with VCC still hardwired
+ * put the eMMC in a datasheet-illegal state with unspecified draw. feldd ships
+ * its whole fleet with every one of those lines untouched and floating — the
+ * chips' power-on defaults are evidently cheap — so untouched is the proven
+ * state and this firmware matches it. Do not re-add a hold here without a
+ * measured %/day win behind it (HA battery-sensor history is the meter).
+ * Driven GPIO state is retained through SYSTEM_OFF, so the osc stays disabled
+ * while "off and charging" too. */
 static void board_quiesce(void)
 {
-    static const uint8_t p0_low[] = { 6, 7, 8, 13, 14 };
+    uint32_t osc_en = NRF_GPIO_PIN_MAP(0, 13);
 
-    for (unsigned int i = 0; i < sizeof(p0_low); i++) {
-        uint32_t pin = NRF_GPIO_PIN_MAP(0, p0_low[i]);
-        nrf_gpio_pin_clear(pin);
-        nrf_gpio_cfg_output(pin);
-        nrf_gpio_pin_clear(pin);
-    }
-    uint32_t emmc_rst = NRF_GPIO_PIN_MAP(1, 8);
-    nrf_gpio_pin_clear(emmc_rst);
-    nrf_gpio_cfg_output(emmc_rst);
-    nrf_gpio_pin_clear(emmc_rst);
+    nrf_gpio_pin_clear(osc_en);
+    nrf_gpio_cfg_output(osc_en);
+    nrf_gpio_pin_clear(osc_en);
 }
 
 /* ---- BQ24232 charger (feldd/looper-verified: /CE low or the cell never
