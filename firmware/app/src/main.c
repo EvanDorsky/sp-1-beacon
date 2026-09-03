@@ -74,11 +74,16 @@ static void ensure_wdt_started(void)
  * life measured on the bench. Park every one of them at boot, LOW:
  *
  *   P0.13  3.072 MHz audio-MCLK oscillator, enable ACTIVE-HIGH -> disabled
- *   P0.09  TAS2505 speaker amp   /RESET (active-low) -> held in reset
- *   P0.15  CS42L42 headphone codec /RESET (active-low) -> held in reset
  *   P0.14  eMMC VCCQ power switch, HIGH = on -> rail OFF
  *   P0.06/07/08 + P1.08  eMMC CLK/DAT0/CMD/RST -> driven LOW so nothing
  *          back-powers the unpowered card through its I/O ESD diodes
+ *
+ * The codec /RESET holds (TAS2505 P0.09, CS42L42 P0.15) were REVERTED after a
+ * bench soak went the wrong way: the codecs' power-on register defaults are
+ * already powered-down (feldd ships the whole fleet with these lines untouched
+ * and floating), so holding reset won ~nothing — while likely burning current
+ * through the boards' reset pull-ups around the clock. Left untouched = the
+ * feldd-proven state. The eMMC quiesce stays pending its own soak verdict.
  *
  * Polarities verified against the stem-player firmware that drives these
  * chips (marisko app/src/codec.c + emmc.c). None of these pins collide with
@@ -86,7 +91,7 @@ static void ensure_wdt_started(void)
  * so this quiesces the "off and charging" state too, not just idle. */
 static void board_quiesce(void)
 {
-    static const uint8_t p0_low[] = { 6, 7, 8, 9, 13, 14, 15 };
+    static const uint8_t p0_low[] = { 6, 7, 8, 13, 14 };
 
     for (unsigned int i = 0; i < sizeof(p0_low); i++) {
         uint32_t pin = NRF_GPIO_PIN_MAP(0, p0_low[i]);
