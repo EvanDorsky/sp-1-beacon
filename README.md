@@ -25,8 +25,10 @@ from feldd — read `bluetooth/README.md` first, and mind its safety headline:
 The firmware is now the product's shape: the SP-1 idles in low power (radio in
 reset, LEDs dark, the control rail duty-cycled around a ~40 ms scan) and wakes
 on **any activity — a button held or a fader moved**. While awake it
-broadcasts the full control state and refreshes it on every change; ~5 s after
-the last activity it goes back to sleep. Faders freeze at last-good while a
+broadcasts the full control state and refreshes it on every change; once the
+last packet has had its ~600 ms on-air dwell it stops advertising, holds the
+radio out of reset (silent) for 500 ms so a follow-up press skips the module
+reboot, and goes back to sleep. Faders freeze at last-good while a
 button is held (a pressed button sags the shared rail and corrupts fader
 reads — feldd's bench finding); fader moves register whenever no button is
 down, including from idle, where a move alone wakes the radio.

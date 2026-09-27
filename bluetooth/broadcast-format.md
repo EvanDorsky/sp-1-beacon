@@ -71,8 +71,14 @@ The nRF classifies each debounced press: `press` at the down edge, plus
 2. composes the packet with that button's event value (others `0x00`),
 3. broadcasts it for the **on-air dwell** (~600 ms, ack-gated, exactly the
    existing latch machinery) so the receiver's duty-cycled scanner catches it,
-4. keepalives during the linger window **reuse the same packet id** — BTHome
-   receivers only process a *changed* pid, so repeats are free and harmless.
+4. re-sends and keepalives within the dwell **reuse the same packet id** —
+   BTHome receivers only process a *changed* pid, so repeats are free and
+   harmless.
+
+Once the last packet (event or fader) has had its dwell, the nRF sends
+`ADV 0`: the module stops advertising but stays out of reset for a 500 ms
+silent linger, so a follow-up press restarts advertising (any `SET_STATE`
+does) without rebooting the module. Nothing is on the air during the linger.
 
 This is strictly more robust than the state bits: any single sighting of the
 event packet delivers the press, dedup is the receiver's job (pid), and a

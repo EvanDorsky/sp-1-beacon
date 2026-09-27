@@ -9,8 +9,10 @@
  * data (bthome.h, bluetooth/broadcast-format.md) that Home Assistant decodes
  * natively. Each event gets its own packet id and is held on the air for an
  * acked dwell so a duty-cycled receiver catches it; keepalives repeat the
- * same pid (receivers dedup on it). LINGER_MS after the last activity the
- * radio powers back down.
+ * same pid (receivers dedup on it). Once the last packet has had its dwell
+ * the module stops advertising but stays out of reset for LINGER_MS, so a
+ * follow-up press resumes instantly instead of re-booting the module; then
+ * the radio powers back down.
  *
  * While a button is held it sags the shared BTN_COM rail and corrupts fader
  * reads (bench finding), so fader values FREEZE at last-good while the rail
@@ -180,9 +182,13 @@ static void boot_signature(void) {
   2000 /* rail-up to first sample. BENCH-TUNE: if idle                                             \
         * scans misread (phantom wakes / missed                                                    \
         * presses), this is the first knob. */
-#define LINGER_MS                                                                                  \
-  5000                       /* keep broadcasting this long after the last                         \
-                              * activity before going back to sleep */
+/* Once the last packet has had its dwell, the module stops advertising but is
+ * held out of reset this long (quiet) before going back to sleep. This only
+ * debounces the reset line: a follow-up press inside it re-uses the running
+ * module instead of paying a reboot. Advertising is NOT kept up for it — at
+ * the module's 20 ms interval, 5 s of advertising linger was ~250 wasted adv
+ * events per wake. Extended while a button is held or events are queued. */
+#define LINGER_MS 500
 #define WAKE_TIMEOUT_MS 5000 /* module boot watchdog: give up and retry */
 #define KEEPALIVE_MS 1000    /* re-send the unchanged packet this often */
 #define SEND_RETRY_MS                                                                              \
@@ -226,7 +232,9 @@ static uint8_t last_bcast_fader[4]; /* what's been broadcast; dirty = moved past
 static bool fader_seeded;           /* first clean read seeds the baseline, no phantom wake */
 static uint8_t battery = BTHOME_BATT_UNKNOWN;
 static uint8_t pid; /* BTHome packet id: bumps per EVENT, survives sleeps */
-static int64_t wake_t, activity_t, last_send_t;
+static int64_t wake_t, last_send_t;
+static bool adv_on;     /* module advertising (any SET_STATE (re)starts it; ADV 0 stops it) */
+static int64_t quiet_t; /* BC_ON: when the module last went (or stayed) quiet; LINGER_MS base */
 static bool idle_rail_on; /* idle rail currently powered (USB: kept on) */
 
 /* Pending button events (FIFO). Each event gets its own packet id and holds the
@@ -277,6 +285,7 @@ static void payload_send(int64_t now) {
 
   if (n > 0) {
     (void) module_link_send(WHCI_FELDD_SET_STATE, p, (uint16_t) n);
+    adv_on = true; /* SET_STATE (re)starts advertising if the module was quiet */
   }
   last_send_t = now;
 }
@@ -593,6 +602,7 @@ static void charge_standby_gate(uint32_t wake_reas) {
 static void bc_go_idle(void) {
   (void) module_link_adv(false); /* courtesy; the reset kills it anyway */
   module_link_power(false);
+  adv_on = false;
   controls_rail(0);
   idle_rail_on = false; /* rail dropped; next idle scan re-settles */
   led_pin(SP1_LED1, false);
@@ -606,7 +616,6 @@ static void bc_wake(const char* why) {
   controls_rail(1); /* rail stays on while awake */
   module_link_power(true);
   wake_t = k_uptime_get();
-  activity_t = wake_t;
   bc = BC_WAKE;
 }
 
@@ -754,7 +763,7 @@ int main(void) {
         } else {
           packet_new(-1, BTHOME_EV_NONE, now);
         }
-        activity_t = now; /* linger from the first broadcast, not from wake */
+        quiet_t = now; /* linger clock starts once this packet has aired */
         bc = BC_ON;
       } else if (k_uptime_get() - wake_t > WAKE_TIMEOUT_MS) {
         printk("BC: module boot timeout, retrying via idle\n");
@@ -774,26 +783,38 @@ int main(void) {
       if (acked && pkt_air_t < 0) {
         pkt_air_t = now; /* current pid confirmed on the air */
       }
-      /* An event packet must stay up for EVENT_DWELL_MS of acked time (or
-       * the hard cap) before the next queued event may replace it; a
-       * no-event packet may be replaced immediately. */
-      bool dwell_done = !cur_has_event || (pkt_air_t >= 0 && now - pkt_air_t >= EVENT_DWELL_MS) ||
-                        (now - pkt_send_t >= EVENT_CAP_MS);
+      /* The current packet (event OR fader) has been on the air long enough:
+       * EVENT_DWELL_MS of acked time, or the hard cap. */
+      bool aired = (pkt_air_t >= 0 && now - pkt_air_t >= EVENT_DWELL_MS) ||
+                   (now - pkt_send_t >= EVENT_CAP_MS);
+      /* An event packet must have aired before the next queued event may
+       * replace it; a no-event packet may be replaced immediately. */
+      bool dwell_done = !cur_has_event || aired;
       uint8_t btn, ev;
       if (dwell_done && evq_pop(&btn, &ev)) {
-        packet_new(btn, ev, now); /* next event -> new pid */
-        activity_t = now;
+        packet_new(btn, ev, now); /* next event -> new pid (restarts adv if quiet) */
       } else if (dwell_done && evq_len == 0 && fader_dirty() && now - pkt_send_t >= FADER_MIN_MS) {
         packet_new_faders(now); /* fader update; events always preempt */
-        activity_t = now;
-      } else if (now - last_send_t >= (acked ? KEEPALIVE_MS : SEND_RETRY_MS)) {
-        payload_send(now); /* same pid + content: retry/keepalive */
+      } else if (adv_on && now - last_send_t >= (acked ? KEEPALIVE_MS : SEND_RETRY_MS)) {
+        payload_send(now); /* same pid + content: retry/keepalive (never while quiet) */
       }
-      /* Linger restarts while anything is held or events are pending. */
-      if (any_down() || evq_len > 0) {
-        activity_t = now;
+
+      /* Go quiet once the last packet has aired and nothing more is coming:
+       * the module stops advertising but stays out of reset. The dwell covers
+       * fader packets too, so a slide's final value still reaches the
+       * receiver. Anything new re-sends SET_STATE, which restarts advertising
+       * on the already-running module — no reboot. */
+      if (adv_on && aired && evq_len == 0 && !fader_dirty()) {
+        (void) module_link_adv(false);
+        adv_on = false;
+        quiet_t = now;
+        printk("BC: quiet (module up, not advertising)\n");
       }
-      if (now - activity_t > LINGER_MS) {
+      /* Reset the module LINGER_MS after going quiet. The clock holds while
+       * advertising, while a button is held, or while events are queued. */
+      if (adv_on || any_down() || evq_len > 0) {
+        quiet_t = now;
+      } else if (now - quiet_t > LINGER_MS) {
         bc_go_idle();
       }
     }
@@ -822,9 +843,9 @@ int main(void) {
       }
     } else {
       if (func_since >= 0 && k_uptime_get() - func_since < FUNC_TAP_MS) {
-        printk("•• tap: bc=%d module=%d pid=%u evq=%d faders=%u/%u/%u/%u batt=%u\n", (int) bc,
-               (int) module_link_state(), pid, evq_len, fader[0], fader[1], fader[2], fader[3],
-               battery);
+        printk("•• tap: bc=%d module=%d adv=%d pid=%u evq=%d faders=%u/%u/%u/%u batt=%u\n",
+               (int) bc, (int) module_link_state(), (int) adv_on, pid, evq_len, fader[0], fader[1],
+               fader[2], fader[3], battery);
         if (module_link_state() == MODULE_UP) {
           (void) module_link_ping();
         }
