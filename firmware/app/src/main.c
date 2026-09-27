@@ -63,6 +63,24 @@ static void ensure_wdt_started(void) {
   NRF_WDT->TASKS_START = 1u;
 }
 
+/* ---- park the stem player's audio MCLK oscillator ----
+ *
+ * P0.13 enables the 3.072 MHz audio-MCLK oscillator (active-high), which the
+ * beacon never uses; left untouched it runs, mA-class. Restored from 179dfa4:
+ * the osc-only quiesce was the one hold that measured as a win, and 70f866a
+ * (which removed it, along with a clang-format) doubled the drain in HA's
+ * battery history: 3.4 %/day under 179dfa4 -> 5.2-6.3 %/day after, the latter
+ * over the flatter upper part of the curve. The codec /RESET holds and the
+ * eMMC VCCQ cut stay out (they measured worse). Driven GPIO state is retained
+ * through SYSTEM_OFF, so the osc stays off while "off and charging" too. */
+static void board_quiesce(void) {
+  uint32_t osc_en = NRF_GPIO_PIN_MAP(0, 13);
+
+  nrf_gpio_pin_clear(osc_en);
+  nrf_gpio_cfg_output(osc_en);
+  nrf_gpio_pin_clear(osc_en);
+}
+
 /* ---- BQ24232 charger (feldd/looper-verified: /CE low or the cell never
  * charges and the device browns out at random) ---- */
 
@@ -606,6 +624,10 @@ int main(void) {
    * SYSTEM_OFF, so the module can never advertise while "off and charging". */
   nrf_gpio_cfg_output(NRF_GPIO_PIN_MAP(0, 10));
   nrf_gpio_pin_clear(NRF_GPIO_PIN_MAP(0, 10));
+
+  /* Same first-instant rule for the audio MCLK osc: parked before the gate
+   * can SYSTEM_OFF, retained through it. */
+  board_quiesce();
 
   charger_init();
 
