@@ -202,6 +202,14 @@ static void boot_signature(void) {
 #define EVENT_CAP_MS                                                                               \
   1000 /* hard cap from first send: a module that stops                                            \
         * acking can't wedge the event queue forever */
+#define QUIET_AFTER_MS                                                                             \
+  2000 /* the LAST packet (nothing newer queued) stays on the air this long of \
+        * acked time before the module goes quiet. EVENT_DWELL_MS (600) alone \
+        * was too short once de55bca stopped the 5 s keepalive tail: a        \
+        * receiver scan gap longer than 600 ms (Pi BT/WiFi coex) dropped      \
+        * short presses. Replacement by a NEWER press still waits only        \
+        * EVENT_DWELL_MS, so back-to-back presses don't queue behind this.    \
+        * ~100 advertisements at 20 ms: a negligible cost per press. */
 #define FADER_RAW_FULL                                                                             \
   3650 /* raw ADC at full fader deflection. The 3.6 V                                              \
         * ADC full-scale (gain 1/6, 0.6 V internal ref)                                            \
@@ -799,12 +807,14 @@ int main(void) {
         payload_send(now); /* same pid + content: retry/keepalive (never while quiet) */
       }
 
-      /* Go quiet once the last packet has aired and nothing more is coming:
-       * the module stops advertising but stays out of reset. The dwell covers
+      /* Go quiet once the last packet has aired QUIET_AFTER_MS and nothing more
+       * is coming: the module stops advertising but stays out of reset. The dwell covers
        * fader packets too, so a slide's final value still reaches the
        * receiver. Anything new re-sends SET_STATE, which restarts advertising
        * on the already-running module — no reboot. */
-      if (adv_on && aired && evq_len == 0 && !fader_dirty()) {
+      bool final_aired = (pkt_air_t >= 0 && now - pkt_air_t >= QUIET_AFTER_MS) ||
+                         (now - pkt_send_t >= QUIET_AFTER_MS + (EVENT_CAP_MS - EVENT_DWELL_MS));
+      if (adv_on && final_aired && evq_len == 0 && !fader_dirty()) {
         (void) module_link_adv(false);
         adv_on = false;
         quiet_t = now;
