@@ -670,11 +670,13 @@ int main(void) {
   module_link_init(); /* UART up; module stays in reset until asked */
 
   /* USB is the console, but it's also idle-power poison — only bring it up
-   * when VBUS is actually present (bench). On battery it stays down; if the
-   * cable appears later, the loop below starts it then. */
+   * when VBUS is actually present (bench). On battery it stays down; the loop
+   * below starts it when the cable appears and stops it when it goes. */
   int usb_up = 0;
+  int64_t usb_gone_t = -1; /* uptime USB power was first seen absent while up, or -1 */
   if (usb_present()) {
-    usb_up = (usbdev_start() == 0);
+    int r = usbdev_start();
+    usb_up = (r == 0 || r == -EALREADY);
   }
 
   printk("sp1-beacon M3a (wake=%08x)\n", wake_reas);
@@ -700,7 +702,24 @@ int main(void) {
 
     int usb_now = usb_present();
     if (!usb_up && usb_now) {
-      usb_up = (usbdev_start() == 0);
+      int r = usbdev_start();
+      usb_up = (r == 0 || r == -EALREADY);
+    }
+    /* Unplugged: disable USB once power has been gone 1 s (rides out
+     * power-good bounce during plug/unplug). An enabled USB driver holds the
+     * 64 MHz crystal oscillator on, so leaving it up after an unplug cost a
+     * few hundred uA on battery until the next power cycle. */
+    if (usb_up && !usb_now) {
+      int64_t t = k_uptime_get();
+      if (usb_gone_t < 0) {
+        usb_gone_t = t;
+      } else if (t - usb_gone_t >= 1000) {
+        int r = usbdev_stop();
+        usb_up = !(r == 0 || r == -EALREADY);
+        usb_gone_t = -1;
+      }
+    } else {
+      usb_gone_t = -1;
     }
 
     /* ---- sample the controls (rail handling depends on state) ---- */
