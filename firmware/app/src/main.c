@@ -65,22 +65,43 @@ static void ensure_wdt_started(void) {
   NRF_WDT->TASKS_START = 1u;
 }
 
-/* ---- park the stem player's audio MCLK oscillator ----
+/* ---- park the stem player's audio MCLK oscillator + eMMC ----
  *
  * P0.13 enables the 3.072 MHz audio-MCLK oscillator (active-high), which the
  * beacon never uses; left untouched it runs, mA-class. Restored from 179dfa4:
  * the osc-only quiesce was the one hold that measured as a win, and 70f866a
  * (which removed it, along with a clang-format) doubled the drain in HA's
  * battery history: 3.4 %/day under 179dfa4 -> 5.2-6.3 %/day after, the latter
- * over the flatter upper part of the curve. The codec /RESET holds and the
- * eMMC VCCQ cut stay out (they measured worse). Driven GPIO state is retained
- * through SYSTEM_OFF, so the osc stays off while "off and charging" too. */
+ * over the flatter upper part of the curve.
+ *
+ * Also powers the eMMC (stem storage, never used by the beacon) off: P0.14 is
+ * its power switch (high = on, per marisko's emmc.c, which power-cycles the
+ * chip through it), and its CLK/DAT0/CMD/RST lines are parked low so the
+ * unpowered chip isn't fed through them. Re-added 2026-10-04: the earlier
+ * "it measured worse" verdict was confounded by the USB bug (3376261) leaving
+ * the 64 MHz crystal on after every flash+unplug. Revert this block if the
+ * battery slope gets worse. The codec /RESET holds stay out (untested since).
+ *
+ * Driven GPIO state is retained through SYSTEM_OFF, so all of this holds
+ * while "off and charging" too. */
 static void board_quiesce(void) {
   uint32_t osc_en = NRF_GPIO_PIN_MAP(0, 13);
 
   nrf_gpio_pin_clear(osc_en);
   nrf_gpio_cfg_output(osc_en);
   nrf_gpio_pin_clear(osc_en);
+
+  /* eMMC: VCCQ (P0.14) off, then CLK P0.06 / DAT0 P0.07 / CMD P0.08 /
+   * RST P1.08 low. */
+  static const uint32_t emmc_low[] = {
+      NRF_GPIO_PIN_MAP(0, 14), NRF_GPIO_PIN_MAP(0, 6), NRF_GPIO_PIN_MAP(0, 7),
+      NRF_GPIO_PIN_MAP(0, 8),  NRF_GPIO_PIN_MAP(1, 8),
+  };
+  for (unsigned int i = 0; i < sizeof(emmc_low) / sizeof(emmc_low[0]); i++) {
+    nrf_gpio_pin_clear(emmc_low[i]);
+    nrf_gpio_cfg_output(emmc_low[i]);
+    nrf_gpio_pin_clear(emmc_low[i]);
+  }
 }
 
 /* ---- BQ24232 charger (feldd/looper-verified: /CE low or the cell never
