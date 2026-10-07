@@ -25,16 +25,9 @@
  * trimmed to shave wake latency; the module's cold boot dominates the rest). */
 #define STRAP_SAFE_MS 20
 
-/* If the app hasn't produced a single frame this long after boot, say so on the
- * console (once) — module state stays BOOTING and frames are still logged if
- * they arrive later. */
-#define BOOT_QUIET_WARN_MS 3000
-
 static const struct device *uart = DEVICE_DT_GET(DT_NODELABEL(uart0));
 
 static enum module_state state = MODULE_OFF;
-static int64_t boot_t;
-static bool quiet_warned;
 static volatile int last_ack_seq = -1;   /* seq echoed by the latest STATE_ACK */
 static volatile int app_id;              /* 0 unknown / 1 ours / -1 other (see .h) */
 
@@ -104,7 +97,6 @@ int module_link_init(void)
     whci_parser_init(&parser);
 
     if (!device_is_ready(uart)) {
-        printk("BT: uart0 not ready\n");
         return -1;
     }
     uart_irq_callback_user_data_set(uart, uart_isr, NULL);
@@ -130,11 +122,8 @@ void module_link_power(bool on)
         nrf_gpio_pin_clear(MODULE_CTS);
         whci_parser_init(&parser);
         state = MODULE_BOOTING;
-        boot_t = k_uptime_get();
-        quiet_warned = false;
         last_ack_seq = -1;   /* fresh boot: no state acked yet */
         app_id = 0;          /* re-identify the app from its traffic */
-        printk("BT: module reset released (normal boot)\n");
     } else {
         if (state == MODULE_OFF) {
             return;
@@ -143,7 +132,6 @@ void module_link_power(bool on)
         nrf_gpio_pin_clear(MODULE_RSTN);    /* hold in reset = BT off */
         state = MODULE_OFF;
         link_uart_active(false);            /* nothing to hear: sleep the UART */
-        printk("BT: module held in reset\n");
     }
 }
 
@@ -162,23 +150,6 @@ int module_link_app(void)
     return app_id;
 }
 
-static void log_frame(const struct whci_frame *f)
-{
-    if (f->kind == WHCI_PKT_WICED) {
-        printk("BT: rx wiced grp=%02x code=%02x len=%u:",
-               WHCI_GROUP(f->opcode), WHCI_CODE(f->opcode), f->len);
-    } else {
-        printk("BT: rx hci-evt %02x len=%u:", f->event, f->len);
-    }
-    for (uint16_t i = 0; i < f->len && i < 32; i++) {
-        printk(" %02x", f->payload[i]);
-    }
-    if (f->len > 32) {
-        printk(" ...");
-    }
-    printk("\n");
-}
-
 void module_link_poll(void)
 {
     struct whci_frame f;
@@ -189,15 +160,12 @@ void module_link_poll(void)
         if (!whci_parse_byte(&parser, b, &f)) {
             continue;
         }
-        log_frame(&f);
         /* Any event in the FELDD private group proves the app is up; STATE_ACK
          * additionally confirms a SET_STATE was applied (advertising started)
          * and echoes its seq, which the broadcast loop uses to stop re-sending. */
         if (f.kind == WHCI_PKT_WICED && WHCI_GROUP(f.opcode) == WHCI_GROUP_FELDD) {
             if (state == MODULE_BOOTING) {
                 state = MODULE_UP;
-                printk("BT: module UP (first FELDD event %d ms after reset)\n",
-                       (int)(k_uptime_get() - boot_t));
             }
             if (WHCI_CODE(f.opcode) == WHCI_FELDD_STATE_ACK && f.len >= 1) {
                 last_ack_seq = f.payload[0];
@@ -208,13 +176,6 @@ void module_link_poll(void)
                 app_id = -1;                      /* 0xF0 traffic that isn't ours */
             }
         }
-    }
-
-    if (state == MODULE_BOOTING && !quiet_warned &&
-        k_uptime_get() - boot_t > BOOT_QUIET_WARN_MS) {
-        quiet_warned = true;
-        printk("BT: no frame %d ms after boot (garbage=%u overruns=%u)\n",
-               BOOT_QUIET_WARN_MS, parser.garbage_bytes, ring_overruns);
     }
 }
 
@@ -230,7 +191,6 @@ int module_link_send(uint8_t code, const uint8_t *payload, uint16_t len)
     if (n < 0) {
         return -1;
     }
-    printk("BT: tx grp=f0 code=%02x len=%u\n", code, len);
     for (int i = 0; i < n; i++) {
         uart_poll_out(uart, buf[i]);
     }

@@ -246,16 +246,18 @@ static void boot_signature(void) {
                              * take priority */
 #define GAUGE_BATT_MS 10000 /* charge-gauge battery sample cadence (USB only) */
 #define FUNC_OFF_MS 5000    /* •• held this long powers the device off */
-#define FUNC_TAP_MS 1000    /* •• released before this = a status tap, not a hold */
 
 enum bc_state { BC_IDLE, BC_WAKE, BC_ON };
 
-static const char* const btn_name[BTN_COUNT] = {
-    "PLAY", "T1", "T2", "T3", "T4", "VOL+", "VOL-", "FWD", "RWD",
-};
 
 static enum bc_state bc = BC_IDLE;
-static struct bthome_clf clf;       /* debounced edges -> press/long_press events */
+static struct bthome_clf clf;
+/* •• is a SHIFT key: a button pressed while •• is held is sent as
+ * double_press (long hold: long_double_press) instead of press / long_press,
+ * doubling the bindable actions in Home Assistant. Set once any button is
+ * pressed during the current •• hold; that hold then never powers off (the
+ * user is chording, not reaching for the off gesture). Cleared on release. */
+static bool func_used_as_shift;       /* debounced edges -> press/long_press events */
 static uint8_t fader[4];            /* live fader values (rail-frozen while a button sags it) */
 static uint8_t last_bcast_fader[4]; /* what's been broadcast; dirty = moved past the deadband */
 static bool fader_seeded;           /* first clean read seeds the baseline, no phantom wake */
@@ -276,7 +278,6 @@ static int evq_head, evq_len;
 
 static void evq_push(uint8_t btn, uint8_t ev) {
   if (evq_len >= EVQ_CAP) {
-    printk("BC: event queue full, dropping %s\n", btn_name[btn]);
     return;
   }
   int slot = (evq_head + evq_len) % EVQ_CAP;
@@ -329,8 +330,6 @@ static void packet_new(int btn, uint8_t ev, int64_t now) {
   if (btn >= 0) {
     cur_ev[btn] = ev;
     cur_has_event = true;
-    printk("BC: event %s %s (pid %u)\n", btn_name[btn],
-           ev == BTHOME_EV_LONG_PRESS ? "long_press" : "press", (uint8_t) (pid + 1));
   }
   pid++;
   pkt_send_t = now;
@@ -389,8 +388,11 @@ static int scan_controls(void) {
   int64_t now = k_uptime_get();
 
   for (int i = 0; i < n; i++) {
-    printk("BTN %s %s\n", btn_name[evt[i].idx], evt[i].pressed ? "down" : "up");
-    uint8_t e = bthome_clf_edge(&clf, evt[i].idx, evt[i].pressed, now);
+    bool shift = nrf_gpio_pin_read(SP1_FUNC_BTN) == 0;
+    if (shift && evt[i].pressed) {
+      func_used_as_shift = true;
+    }
+    uint8_t e = bthome_clf_edge(&clf, evt[i].idx, evt[i].pressed, shift, now);
     if (e != BTHOME_EV_NONE) {
       evq_push(evt[i].idx, e);
     }
@@ -464,7 +466,6 @@ static bool radio_probed; /* probe once per boot (gate or main, whichever first)
  * identify itself, power it back down. Sets radio_not_ours. */
 static void radio_probe(void) {
   radio_probed = true;
-  printk("BT: probing which app the radio runs...\n");
   module_link_power(true);
   int64_t t0 = k_uptime_get();
   while (k_uptime_get() - t0 < 3500 && module_link_app() == 0) {
@@ -474,10 +475,6 @@ static void radio_probe(void) {
   }
   radio_not_ours = (module_link_app() != 1);
   module_link_power(false);
-  printk("BT: radio app = %s\n", module_link_app() == 1 ? "ours"
-                                 : module_link_app() == -1
-                                     ? "OTHER — hold PLAY 5 s (USB in) to provision"
-                                     : "silent/stock — hold PLAY 5 s (USB in) to provision");
 }
 
 /* Provisioning progress on the 4 side LEDs: PREP = all four blink together;
@@ -576,7 +573,6 @@ static void charge_standby_gate(uint32_t wake_reas) {
       }
       bool held = play_since >= 0;
       if (held && now - play_since >= 5000) {
-        printk("PROVISION: PLAY held 5 s in charge standby — flashing the radio\n");
         for (int i = 0; i < LED_COUNT; i++) {
           led_idx(i, false);
         }
@@ -637,11 +633,9 @@ static void bc_go_idle(void) {
   led_pin(SP1_LED1, false);
   evq_head = evq_len = 0; /* defensive: idle is only reached quiet */
   bc = BC_IDLE;
-  printk("BC: idle (rail duty-cycled, module in reset)\n");
 }
 
 static void bc_wake(const char* why) {
-  printk("BC: wake (%s)\n", why);
   controls_rail(1); /* rail stays on while awake */
   module_link_power(true);
   wake_t = k_uptime_get();
@@ -700,7 +694,6 @@ int main(void) {
     usb_up = (r == 0 || r == -EALREADY);
   }
 
-  printk("sp1-beacon M3a (wake=%08x)\n", wake_reas);
 
 #ifdef CONFIG_SP1_PROVISION
   /* On USB power, find out which app the radio runs (drives the "needs
@@ -793,7 +786,6 @@ int main(void) {
     if (bc == BC_WAKE) {
       if (module_link_state() == MODULE_UP) {
         int64_t now = k_uptime_get();
-        printk("BC: on (module boot %d ms)\n", (int) (now - wake_t));
         radio_not_ours = (module_link_app() == -1); /* wake re-identifies */
         (void) module_link_adv(true); /* legacy-app compat; harmless on the beacon app */
         int pct = battery_pct(controls_read_raw(6)); /* one battery read per wake */
@@ -814,7 +806,6 @@ int main(void) {
         quiet_t = now; /* linger clock starts once this packet has aired */
         bc = BC_ON;
       } else if (k_uptime_get() - wake_t > WAKE_TIMEOUT_MS) {
-        printk("BC: module boot timeout, retrying via idle\n");
         if (module_link_app() != 1) {
           radio_not_ours = true; /* silent radio: stock TE app */
         }
@@ -822,7 +813,6 @@ int main(void) {
         bc = BC_IDLE; /* keep queued events; re-wake next tick */
         controls_rail(0);
         idle_rail_on = false;
-        printk("BC: idle (module boot retry)\n");
       }
     } else if (bc == BC_ON) {
       int64_t now = k_uptime_get();
@@ -858,7 +848,6 @@ int main(void) {
         (void) module_link_adv(false);
         adv_on = false;
         quiet_t = now;
-        printk("BC: quiet (module up, not advertising)\n");
       }
       /* Reset the module LINGER_MS after going quiet. The clock holds while
        * advertising, while a button is held, or while events are queued. */
@@ -875,7 +864,6 @@ int main(void) {
      * bootloader boots (press •• or plug USB) enters DFU the way TE/
      * solderless do it. Every build powers off the same two ways. */
     if (buttons_dfu_held()) {
-      printk("Track 1+4 held: powering off (hold 1+4 + USB at boot for DFU)\n");
       power_off();
     }
 
@@ -883,25 +871,17 @@ int main(void) {
      * Time-based so it stays ~5 s regardless of loop cadence (idle 40 ms vs
      * active 8 ms) — the old tick counter drifted with POLL_*_MS. */
     if (nrf_gpio_pin_read(SP1_FUNC_BTN) == 0) {
-      if (func_armed) {
+      if (func_armed && !func_used_as_shift) {
         if (func_since < 0) {
           func_since = k_uptime_get();
         } else if (k_uptime_get() - func_since >= FUNC_OFF_MS) {
-          printk("•• held: powering off\n");
           power_off();
         }
       }
     } else {
-      if (func_since >= 0 && k_uptime_get() - func_since < FUNC_TAP_MS) {
-        printk("•• tap: bc=%d module=%d adv=%d pid=%u evq=%d faders=%u/%u/%u/%u batt=%u\n",
-               (int) bc, (int) module_link_state(), (int) adv_on, pid, evq_len, fader[0], fader[1],
-               fader[2], fader[3], battery);
-        if (module_link_state() == MODULE_UP) {
-          (void) module_link_ping();
-        }
-      }
       func_since = -1;
       func_armed = 1;
+      func_used_as_shift = false;
     }
 
 #ifdef CONFIG_SP1_PROVISION
@@ -910,8 +890,9 @@ int main(void) {
      * (never a multi-minute write on a marginal battery). The engine is
      * timeout-bounded and template-gated; on refusal/failure we return
      * here with the •• power-off escape intact. */
-    if (usb_now && bthome_clf_down(&clf, 0) && k_uptime_get() - clf.down_t[0] >= 5000) {
-      printk("PROVISION: PLAY held 5 s + USB — flashing the radio\n");
+    /* A SHIFTED PLAY hold (•• + PLAY) is a chord, never the flash gesture. */
+    if (usb_now && bthome_clf_down(&clf, 0) && !bthome_clf_shifted(&clf, 0) &&
+        k_uptime_get() - clf.down_t[0] >= 5000) {
       for (int i = 0; i < LED_COUNT; i++) {
         led_idx(i, false);
       }
@@ -946,7 +927,7 @@ int main(void) {
      * held with USB in — even on an already-provisioned radio, since the
      * gesture works there too). Accelerates with the hold. */
     static bool chasing;
-    bool play_held = bthome_clf_down(&clf, 0);
+    bool play_held = bthome_clf_down(&clf, 0) && !bthome_clf_shifted(&clf, 0);
     bool chase_on = radio_not_ours || (usb_now && (CHASE_DEMO || play_held));
     if (chase_on) {
       chasing = true;

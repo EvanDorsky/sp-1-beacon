@@ -42,9 +42,11 @@
 #define BTHOME_OBJ_COUNT  0x09     /* u8 dimensionless counter: fader value 0..255 */
 #define BTHOME_OBJ_BUTTON 0x3A
 
-#define BTHOME_EV_NONE       0x00
-#define BTHOME_EV_PRESS      0x01
-#define BTHOME_EV_LONG_PRESS 0x04
+#define BTHOME_EV_NONE              0x00
+#define BTHOME_EV_PRESS             0x01
+#define BTHOME_EV_DOUBLE_PRESS      0x02   /* sent for a SHIFTED press (•• held) */
+#define BTHOME_EV_LONG_PRESS        0x04
+#define BTHOME_EV_LONG_DOUBLE_PRESS 0x05   /* sent for a SHIFTED long press */
 
 #define BTHOME_BTN_COUNT  9
 #define BTHOME_BATT_UNKNOWN 0xFF   /* battery arg: omit the battery object */
@@ -80,22 +82,33 @@ int bthome_encode_faders(uint8_t pid, uint8_t battery,
 struct bthome_clf {
     int64_t down_t[BTHOME_BTN_COUNT];   /* uptime of the press edge, -1 = up */
     bool    long_sent[BTHOME_BTN_COUNT];
+    bool    shifted[BTHOME_BTN_COUNT];  /* shift state latched at the press edge */
 };
 
 void bthome_clf_init(struct bthome_clf *c);
 
 /* Feed one debounced edge. A press-down edge returns BTHOME_EV_PRESS (emitted
- * instantly); releases return BTHOME_EV_NONE. */
-uint8_t bthome_clf_edge(struct bthome_clf *c, int idx, bool pressed, int64_t now);
+ * instantly), or BTHOME_EV_DOUBLE_PRESS when `shift` is held at that moment;
+ * releases return BTHOME_EV_NONE. The shift state is latched at the press
+ * edge, so the button's later long press keeps it even if shift is released
+ * mid-hold. `shift` is ignored on releases. */
+uint8_t bthome_clf_edge(struct bthome_clf *c, int idx, bool pressed, bool shift, int64_t now);
 
-/* Per-tick: returns BTHOME_EV_LONG_PRESS exactly once when a held button
- * crosses BTHOME_LONG_MS, else BTHOME_EV_NONE. */
+/* Per-tick: returns BTHOME_EV_LONG_PRESS (or BTHOME_EV_LONG_DOUBLE_PRESS for a
+ * shifted press) exactly once when a held button crosses BTHOME_LONG_MS, else
+ * BTHOME_EV_NONE. */
 uint8_t bthome_clf_poll(struct bthome_clf *c, int idx, int64_t now);
 
 /* True while button idx is (debounced-)down. */
 static inline bool bthome_clf_down(const struct bthome_clf *c, int idx)
 {
     return c->down_t[idx] >= 0;
+}
+
+/* True if button idx's current press started with shift held. */
+static inline bool bthome_clf_shifted(const struct bthome_clf *c, int idx)
+{
+    return c->down_t[idx] >= 0 && c->shifted[idx];
 }
 
 #endif /* BTHOME_H */

@@ -61,7 +61,6 @@ void bt_wire_init(void)
 {
     ring_head = ring_tail = ring_overruns = rx_total = 0;
     if (!device_is_ready(uart)) {
-        printk("DL: uart0 NOT READY\n");
         return;
     }
 #ifdef CONFIG_PM_DEVICE
@@ -114,15 +113,10 @@ bool bt_wire_cmd_cc(const uint8_t *cmd, int clen, uint16_t opcode,
                     uint8_t *data, uint16_t cap, uint16_t *dlen, int timeout_ms)
 {
     struct whci_frame f;
-    uint32_t rx_before = rx_total;
-    int seen = 0;
 
     bt_wire_tx(cmd, clen);
     while (rx_frame(&f, timeout_ms)) {
-        seen++;
         if (f.kind != WHCI_PKT_HCI_EVT || f.event != 0x0E) {
-            printk("DL:   rx non-CC frame kind=%02x evt=%02x len=%u\n",
-                   f.kind, f.event, f.len);
             continue;
         }
         const uint8_t *d;
@@ -137,12 +131,7 @@ bool bt_wire_cmd_cc(const uint8_t *cmd, int clen, uint16_t opcode,
             }
             return true;
         }
-        printk("DL:   rx CC op=%02x%02x status=%02x (wanted op=%04x) len=%u\n",
-               f.payload[2], f.payload[1], f.len >= 4 ? f.payload[3] : 0xFF,
-               opcode, f.len);
     }
-    printk("DL:   (no matching ack: %d frame(s) seen, %u rx bytes, %u overruns)\n",
-           seen, rx_total - rx_before, ring_overruns);
     return false;
 }
 
@@ -165,11 +154,9 @@ bool bt_wire_enter_download(void)
      * dropped. Loop until the ack lands (doc §3/§5). */
     for (int attempt = 0; attempt < 20; attempt++) {
         if (bt_wire_cmd_cc(cmd, n, CYBT_OP_HCI_RESET, NULL, 0, NULL, 200)) {
-            printk("DL: download mode entered (HCI_RESET ack on attempt %d)\n", attempt + 1);
             return true;
         }
     }
-    printk("DL: FAILED to enter download mode (no HCI_RESET ack)\n");
     return false;
 }
 
@@ -200,9 +187,6 @@ void bt_wire_power_off(void)
 
 void bt_wire_halt(const char *msg)
 {
-    printk("%s\n", msg);
-    printk("DL: hold •• (2 s) or Track 1+4 to power off "
-           "(hold 1+4 + plug USB at boot for DFU).\n");
     /* ESCAPE HATCH: dev builds run no control loop, so poll •• (direct GPIO) +
      * the Track 1+4 combo (TRACKS ladder) and power off on a hold. */
     controls_init();

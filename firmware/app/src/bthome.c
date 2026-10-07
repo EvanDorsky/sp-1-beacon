@@ -58,10 +58,11 @@ void bthome_clf_init(struct bthome_clf *c)
     for (int i = 0; i < BTHOME_BTN_COUNT; i++) {
         c->down_t[i] = -1;
         c->long_sent[i] = false;
+        c->shifted[i] = false;
     }
 }
 
-uint8_t bthome_clf_edge(struct bthome_clf *c, int idx, bool pressed, int64_t now)
+uint8_t bthome_clf_edge(struct bthome_clf *c, int idx, bool pressed, bool shift, int64_t now)
 {
     if (idx < 0 || idx >= BTHOME_BTN_COUNT) {
         return BTHOME_EV_NONE;
@@ -72,12 +73,14 @@ uint8_t bthome_clf_edge(struct bthome_clf *c, int idx, bool pressed, int64_t now
          * so don't bind conflicting actions to both on one button). */
         c->down_t[idx] = now;
         c->long_sent[idx] = false;
-        return BTHOME_EV_PRESS;
+        c->shifted[idx] = shift;
+        return shift ? BTHOME_EV_DOUBLE_PRESS : BTHOME_EV_PRESS;
     }
     /* Release emits nothing: press already went out at the down edge and
      * long_press (if any) at its threshold. */
     c->down_t[idx] = -1;
     c->long_sent[idx] = false;
+    c->shifted[idx] = false;
     return BTHOME_EV_NONE;
 }
 
@@ -89,7 +92,7 @@ uint8_t bthome_clf_poll(struct bthome_clf *c, int idx, int64_t now)
     if (c->down_t[idx] >= 0 && !c->long_sent[idx] &&
         now - c->down_t[idx] >= BTHOME_LONG_MS) {
         c->long_sent[idx] = true;
-        return BTHOME_EV_LONG_PRESS;
+        return c->shifted[idx] ? BTHOME_EV_LONG_DOUBLE_PRESS : BTHOME_EV_LONG_PRESS;
     }
     return BTHOME_EV_NONE;
 }

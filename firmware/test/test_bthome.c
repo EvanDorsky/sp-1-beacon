@@ -77,11 +77,11 @@ static void test_classifier_tap(void)
     struct bthome_clf c;
     bthome_clf_init(&c);
 
-    CHECK(bthome_clf_edge(&c, 3, true, 1000) == BTHOME_EV_PRESS,
+    CHECK(bthome_clf_edge(&c, 3, true, false, 1000) == BTHOME_EV_PRESS,
           "press fires INSTANTLY at the down edge");
     CHECK(bthome_clf_down(&c, 3), "down while held");
     CHECK(bthome_clf_poll(&c, 3, 1500) == BTHOME_EV_NONE, "no long before threshold");
-    CHECK(bthome_clf_edge(&c, 3, false, 1600) == BTHOME_EV_NONE, "release emits nothing");
+    CHECK(bthome_clf_edge(&c, 3, false, false, 1600) == BTHOME_EV_NONE, "release emits nothing");
     CHECK(!bthome_clf_down(&c, 3), "up after release");
 }
 
@@ -90,13 +90,13 @@ static void test_classifier_long(void)
     struct bthome_clf c;
     bthome_clf_init(&c);
 
-    CHECK(bthome_clf_edge(&c, 0, true, 0) == BTHOME_EV_PRESS, "press at down, even for a hold");
+    CHECK(bthome_clf_edge(&c, 0, true, false, 0) == BTHOME_EV_PRESS, "press at down, even for a hold");
     CHECK(bthome_clf_poll(&c, 0, BTHOME_LONG_MS - 1) == BTHOME_EV_NONE, "just under threshold");
     CHECK(bthome_clf_poll(&c, 0, BTHOME_LONG_MS) == BTHOME_EV_LONG_PRESS, "long at threshold");
     CHECK(bthome_clf_poll(&c, 0, BTHOME_LONG_MS + 500) == BTHOME_EV_NONE, "long fires once");
-    CHECK(bthome_clf_edge(&c, 0, false, BTHOME_LONG_MS + 900) == BTHOME_EV_NONE,
+    CHECK(bthome_clf_edge(&c, 0, false, false, BTHOME_LONG_MS + 900) == BTHOME_EV_NONE,
           "release after long emits nothing");
-    CHECK(bthome_clf_edge(&c, 0, true, 5000) == BTHOME_EV_PRESS, "re-press fires again");
+    CHECK(bthome_clf_edge(&c, 0, true, false, 5000) == BTHOME_EV_PRESS, "re-press fires again");
 }
 
 static void test_classifier_independent_buttons(void)
@@ -104,13 +104,41 @@ static void test_classifier_independent_buttons(void)
     struct bthome_clf c;
     bthome_clf_init(&c);
 
-    CHECK(bthome_clf_edge(&c, 2, true, 0) == BTHOME_EV_PRESS, "button 2 press at down");
-    CHECK(bthome_clf_edge(&c, 7, true, 100) == BTHOME_EV_PRESS, "button 7 press at down");
-    CHECK(bthome_clf_edge(&c, 2, false, 200) == BTHOME_EV_NONE, "button 2 release quiet");
+    CHECK(bthome_clf_edge(&c, 2, true, false, 0) == BTHOME_EV_PRESS, "button 2 press at down");
+    CHECK(bthome_clf_edge(&c, 7, true, false, 100) == BTHOME_EV_PRESS, "button 7 press at down");
+    CHECK(bthome_clf_edge(&c, 2, false, false, 200) == BTHOME_EV_NONE, "button 2 release quiet");
     CHECK(bthome_clf_poll(&c, 7, 100 + BTHOME_LONG_MS) == BTHOME_EV_LONG_PRESS,
           "button 7 long, independent state");
-    CHECK(bthome_clf_edge(&c, -1, false, 0) == BTHOME_EV_NONE, "bad idx safe");
-    CHECK(bthome_clf_edge(&c, BTHOME_BTN_COUNT, true, 0) == BTHOME_EV_NONE, "oob idx safe");
+    CHECK(bthome_clf_edge(&c, -1, false, false, 0) == BTHOME_EV_NONE, "bad idx safe");
+    CHECK(bthome_clf_edge(&c, BTHOME_BTN_COUNT, true, false, 0) == BTHOME_EV_NONE, "oob idx safe");
+}
+
+static void test_classifier_shift(void)
+{
+    struct bthome_clf c;
+    bthome_clf_init(&c);
+
+    /* shifted tap -> double_press at the down edge, quiet release */
+    CHECK(bthome_clf_edge(&c, 4, true, true, 0) == BTHOME_EV_DOUBLE_PRESS,
+          "shifted press -> double_press");
+    CHECK(bthome_clf_shifted(&c, 4), "shift latched while down");
+    CHECK(bthome_clf_edge(&c, 4, false, false, 300) == BTHOME_EV_NONE, "shifted release quiet");
+    CHECK(!bthome_clf_shifted(&c, 4), "shift cleared on release");
+
+    /* shifted hold -> long_double_press, even if shift is let go mid-hold
+     * (the shift state was latched at the down edge) */
+    CHECK(bthome_clf_edge(&c, 1, true, true, 1000) == BTHOME_EV_DOUBLE_PRESS, "shifted hold starts");
+    CHECK(bthome_clf_poll(&c, 1, 1000 + BTHOME_LONG_MS) == BTHOME_EV_LONG_DOUBLE_PRESS,
+          "shifted long -> long_double_press");
+    CHECK(bthome_clf_poll(&c, 1, 1000 + BTHOME_LONG_MS + 500) == BTHOME_EV_NONE, "long fires once");
+    CHECK(bthome_clf_edge(&c, 1, false, false, 3000) == BTHOME_EV_NONE, "release quiet");
+
+    /* the next unshifted press on the same button is a plain press again */
+    CHECK(bthome_clf_edge(&c, 1, true, false, 4000) == BTHOME_EV_PRESS, "unshifted re-press");
+    CHECK(bthome_clf_poll(&c, 1, 4000 + BTHOME_LONG_MS) == BTHOME_EV_LONG_PRESS,
+          "unshifted long stays long_press");
+    /* shift is ignored on a release */
+    CHECK(bthome_clf_edge(&c, 1, false, true, 6000) == BTHOME_EV_NONE, "shift ignored on release");
 }
 
 int main(void)
@@ -122,6 +150,7 @@ int main(void)
     test_classifier_tap();
     test_classifier_long();
     test_classifier_independent_buttons();
+    test_classifier_shift();
 
     if (failures) {
         printf("%d FAILURE(S)\n", failures);
